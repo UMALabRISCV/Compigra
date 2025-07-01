@@ -753,28 +753,39 @@ getResourceGraph(std::vector<ValuePlacement> curGraph, GridAttribute &attr) {
   return freeReg;
 }
 
-static void updateEmbeddingGraph(std::vector<ValuePlacement> &curGraph,
-                                 Block *curBlk, GridAttribute attr,
-                                 Operation *op, unsigned pe, RegAttr reg,
-                                 SetVector<Operation *> &scheduledOps,
-                                 SetVector<Value> &liveout) {
+void BasicBlockOpAssignment::updateEmbeddingGraph(
+    std::vector<ValuePlacement> &curGraph,
+    SetVector<mlir::Operation *> tmpScheduledOps,
+    std::map<mlir::Operation *, std::pair<unsigned, compigra::RegAttr>>
+        tmpResult,
+    SetVector<Value> &liveout) {
+  SetVector<Operation *> totalScheduledOp = scheduledOps;
+  totalScheduledOp.insert(tmpScheduledOps.begin(), tmpScheduledOps.end());
   // op takes place of pe, invalidate the Rout of the pe
-  for (auto it = curGraph.begin(); it != curGraph.end();) {
-    if (it->pe != pe) {
+  for (auto op : tmpScheduledOps) {
+    auto pe = tmpResult[op].first;
+    RegAttr regAttr = tmpResult[op].second;
+
+    for (auto it = curGraph.begin(); it != curGraph.end();) {
+      if (it->pe != pe) {
+        ++it;
+        continue;
+      }
+
+      if (it->regAttr == RegAttr::EX) {
+        // remove it from the curGraph
+        it = curGraph.erase(it);
+        continue;
+      }
+
+      if (it->regAttr == RegAttr::IE) {
+        it->regAttr = RegAttr::IN;
+      }
       ++it;
-      continue;
     }
-
-    if (it->regAttr == RegAttr::EX) {
-      // remove it from the curGraph
-      it = curGraph.erase(it);
-      continue;
-    }
-
-    if (it->regAttr == RegAttr::IE) {
-      it->regAttr = RegAttr::IN;
-    }
-    ++it;
+    // add operation to curGraph
+    if (op->getNumResults() > 0)
+      curGraph.push_back({op->getResult(0), pe, regAttr});
   }
 
   // update internal register
@@ -786,7 +797,7 @@ static void updateEmbeddingGraph(std::vector<ValuePlacement> &curGraph,
       }
       // check whether the value should be kept anymore
       auto val = it->val;
-      if (!isLive(val, curBlk, liveout, scheduledOps)) {
+      if (!isLive(val, curBlock, liveout, scheduledOps)) {
         std::string message;
         llvm::raw_string_ostream rso(message);
         rso << "Remove dead value " << val << " from PE " << p
@@ -798,10 +809,6 @@ static void updateEmbeddingGraph(std::vector<ValuePlacement> &curGraph,
       }
     }
   }
-
-  // add operation to curGraph
-  if (op->getNumResults() > 0)
-    curGraph.push_back({op->getResult(0), pe, reg});
 }
 
 static std::map<int, PERegUse> getAvailableResourceGraph(
@@ -1193,9 +1200,8 @@ int BasicBlockOpAssignment::placeOperations(
     RegAttr regAttr = tmpResult[op].second;
     SetVector<Operation *> totalScheduledOp = scheduledOps;
     totalScheduledOp.insert(tmpScheduledOps.begin(), tmpScheduledOps.end());
-    updateEmbeddingGraph(curGraph, curBlock, attr, op, pe, regAttr,
-                         totalScheduledOp, liveout);
   }
+  updateEmbeddingGraph(curGraph, tmpScheduledOps, tmpResult, liveout);
 
   // write tmpScheduleResult to scheduleResult
   for (auto [op, unit] : tmpResult) {

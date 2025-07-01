@@ -92,6 +92,7 @@ private:
 
   // The operations and their corresponding spill operations
   std::vector<Value> spilledVals;
+  // std::map<Operation *, Operation *> spillOps;
 
   /// The operations that are blocked from being pop out,
   // WRITE-ONLY by createRoutePath function
@@ -161,6 +162,13 @@ private:
                       std::map<Operation *, std::vector<placeunit>> &space,
                       std::vector<ValuePlacement> &finiGraph,
                       int shuffleOpIdx = -1);
+
+  void updateEmbeddingGraph(
+      std::vector<ValuePlacement> &curGraph,
+      SetVector<mlir::Operation *> tmpScheduledOps,
+      std::map<mlir::Operation *, std::pair<unsigned, compigra::RegAttr>>
+          tmpResult,
+      SetVector<Value> &liveout);
 
   LogicalResult postSchedulingGraphTransformation(
       int &height, int &totalOpNum,
