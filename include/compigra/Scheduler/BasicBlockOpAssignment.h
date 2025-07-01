@@ -162,10 +162,13 @@ private:
                       std::vector<ValuePlacement> &finiGraph,
                       int shuffleOpIdx = -1);
 
-  LogicalResult
-  finiEmbeddingGraphWithLiveOut(std::vector<ValuePlacement> &finiGraph,
-                                std::vector<ValuePlacement> &scheduleGraph,
-                                OpBuilder &builder, GridAttribute attr);
+  LogicalResult postSchedulingGraphTransformation(
+      int &height, int &totalOpNum,
+      std::map<Block *, SetVector<Value>> &liveIns,
+      std::map<Block *, SetVector<Value>> &liveOuts,
+      SmallVector<Operation *, 4> graphTransformedOps,
+      std::vector<compigra::ValuePlacement> &curGraph,
+      std::vector<compigra::ValuePlacement> &finiGraph);
 
 public:
   void setPrerequisiteToStartGraph(std::vector<ValuePlacement> initGraph) {

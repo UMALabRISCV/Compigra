@@ -531,7 +531,7 @@ struct FastASMGenTemporalCGRAPass
       logMessage("FiniGraph:");
       printLiveGraph(bbFiniGraphs);
 
-      // if (bbId == 2)
+      // if (bbId == 4)
       //   break;
       bbId++;
     }
