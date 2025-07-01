@@ -996,18 +996,32 @@ bool isCstZero(Operation *op) {
   return false;
 }
 
-Value getRouteSrcOp(Operation *op, std::vector<Value> spilledVals,
-                    unsigned &step) {
+Value getRouteSrcOp(Operation *op) {
   // op = add srcOp, zero, get SrcOp value until the value is not in
   // spilledVals first check whether op match the pattern;
 
-  if (isa<arith::AddIOp>(op) || isa<arith::AddFOp>(op))
-    if (std::find(spilledVals.begin(), spilledVals.end(), op->getOperand(0)) !=
-        spilledVals.end())
-      if (isCstZero(op->getOperand(1).getDefiningOp()))
-        return op->getOperand(0);
+  if (isa<arith::AddIOp>(op) || isa<arith::AddFOp>(op)) {
+    // the first operand is constant, return the op it self
+    if (op->getOperand(0).getDefiningOp() &&
+        isa<arith::ConstantOp>(op->getOperand(0).getDefiningOp()))
+      return op->getResult(0);
+    if (isCstZero(op->getOperand(1).getDefiningOp()))
+      return op->getOperand(0);
+  }
 
   return op->getResult(0);
+}
+
+Value getRootValue(Value val) {
+  auto defOp = val.getDefiningOp();
+  if (!defOp)
+    return val;
+
+  auto srcVal = getRouteSrcOp(defOp);
+  if (srcVal == val)
+    return val;
+  // recursively get the root value
+  return getRootValue(srcVal);
 }
 
 SmallVector<Operation *, 4> getRouteOpStep1(Value val) {
@@ -1443,6 +1457,20 @@ Operation *BasicBlockOpAssignment::createAtomicMovOp(Value val,
   return movOp;
 }
 
+void BasicBlockOpAssignment::pushSpillOp(Value srcVal, Operation *spillOp) {
+  // first get the root spill operation
+  auto rootVal = getRootValue(srcVal);
+  spilledVals.insert(rootVal);
+  auto exist = std::find(spilledVals.begin(), spilledVals.end(), rootVal);
+  // directly push back to the index of exist
+  if (exist != spilledVals.end()) {
+    unsigned idx = std::distance(spilledVals.begin(), exist);
+    spillOps[idx].push_back(spillOp);
+    return;
+  }
+  spillOps[spillOps.size()].push_back(spillOp);
+}
+
 SmallVector<Operation *, 4>
 BasicBlockOpAssignment::routeOperation(std::vector<ValuePlacement> producers,
                                        std::vector<unsigned> movs,
@@ -1455,41 +1483,42 @@ BasicBlockOpAssignment::routeOperation(std::vector<ValuePlacement> producers,
     if (movNum == 0)
       continue;
     // check whether the mov operation exists
-    unsigned movStep = 0;
+    // unsigned movStep = 0;
     auto origVal = producer.val;
     llvm::errs() << "producer: " << origVal << "\n";
 
-    while (std::find(spilledVals.begin(), spilledVals.end(), origVal) !=
-               spilledVals.end() &&
-           movStep < movNum) {
-      origVal = getRouteOpStep1(origVal)[0]->getResult(0);
-      movStep++;
-    }
+    // while (std::find(spilledVals.begin(), spilledVals.end(), origVal) !=
+    //        spilledVals.end()) {
+    //   origVal = getRouteOpStep1(origVal)[0]->getResult(0);
+    //   movStep++;
+    // }
 
-    if (movStep == movNum) {
-      // replace the producer use with the origVal
-      llvm::errs() << "Replace use in " << *failedOp << " with " << origVal
-                   << "\n";
-      producer.val.replaceUsesWithIf(origVal, [&](OpOperand &opr) {
-        auto owner = opr.getOwner();
-        if ((isa<cgra::ConditionalBranchOp>(owner) &&
-             opr.getOperandNumber() > 1))
-          return false;
-        return opr.getOwner() == failedOp;
-      });
-      continue;
-    }
+    // if (movStep == movNum) {
+    //   // replace the producer use with the origVal
+    //   llvm::errs() << "Replace use in " << *failedOp << " with " << origVal
+    //                << "\n";
+    //   producer.val.replaceUsesWithIf(origVal, [&](OpOperand &opr) {
+    //     auto owner = opr.getOwner();
+    //     if ((isa<cgra::ConditionalBranchOp>(owner) &&
+    //          opr.getOperandNumber() > 1))
+    //       return false;
+    //     return opr.getOwner() == failedOp;
+    //   });
+    //   continue;
+    // }
+
     // if found producer.val in spilledVals, meaning the value is already
     // spilled, then find the next one
 
     // Route producer movNum times
     auto routeVal = origVal;
     Operation *finalRouteOp = nullptr;
-    for (unsigned j = movStep; j < movNum; ++j) {
+    for (unsigned j = 0; j < movNum; ++j) {
       Operation *movOp = createAtomicMovOp(routeVal, false, false);
       finalRouteOp = movOp;
-      spilledVals.push_back(routeVal);
+      // spilledVals.push_back(routeVal);
       routeOps.push_back(movOp);
+      pushSpillOp(routeVal, movOp);
       routeVal = movOp->getResult(0);
     }
     // replace the use of origVal with the finalRouteOp if the use does not

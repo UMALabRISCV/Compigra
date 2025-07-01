@@ -91,8 +91,12 @@ private:
   SetVector<Operation *> scheduledOps;
 
   // The operations and their corresponding spill operations
-  std::vector<Value> spilledVals;
-  // std::map<Operation *, Operation *> spillOps;
+  SetVector<Value> spilledVals;
+  std::map<int, SmallVector<Operation *>> spillOps;
+
+  Operation *getRouteOpByStep(Value val, unsigned step);
+
+  void pushSpillOp(Value srcVal, Operation *spillOp);
 
   /// The operations that are blocked from being pop out,
   // WRITE-ONLY by createRoutePath function
