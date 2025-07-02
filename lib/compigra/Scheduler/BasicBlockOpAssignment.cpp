@@ -39,13 +39,15 @@ void logMessage(const std::string &message, bool overwrite) {
 }
 
 template <typename T>
-static void getSubSet(SetVector<T> &vec1, SetVector<T> &vec2) {
-  for (auto it = vec1.begin(); it != vec1.end();) {
+static SetVector<T> getSubSet(SetVector<T> vec1, SetVector<T> vec2) {
+  SetVector<T> result = vec1;
+  for (auto it = result.begin(); it != result.end();) {
     if (vec2.count(*it) == 0)
-      it = vec1.erase(it);
+      it = result.erase(it);
     else
       ++it;
   }
+  return result;
 }
 
 template <typename T>
@@ -687,8 +689,7 @@ static double getSuccessCost(
 
 static double getSpatialAffinityTotalCost(
     Block *curBlk, std::map<Operation *, ScheduleUnit> scheduleResult,
-    std::vector<ValuePlacement> initGraph,
-    std::vector<ValuePlacement> finiGraph,
+    std::vector<ValuePlacement> curGraph, std::vector<ValuePlacement> finiGraph,
     std::map<Operation *, std::pair<int, int>> heightMap, GridAttribute grid,
     SetVector<Value> liveOut, SetVector<Operation *> scheduledOps) {
   double cost = 0;
@@ -697,7 +698,7 @@ static double getSpatialAffinityTotalCost(
     if (op.first->getNumResults() == 0)
       continue;
     // check the affinity cost with livein values
-    for (auto place : initGraph) {
+    for (auto place : curGraph) {
       if (place.val == op.first->getResult(0) ||
           !isLive(place.val, curBlk, liveOut, scheduledOps))
         continue;
@@ -705,8 +706,8 @@ static double getSpatialAffinityTotalCost(
       cost += getSpatialAffinityCost(
           place.val, {0, (int)place.pe, -1}, op.first->getResult(0), op.second,
           heightMap, finiGraph, grid, op.first->getBlock());
+      count++;
     }
-    count++;
   }
 
   return count == 0 ? 0 : cost / count;
@@ -798,11 +799,6 @@ void BasicBlockOpAssignment::updateEmbeddingGraph(
       // check whether the value should be kept anymore
       auto val = it->val;
       if (!isLive(val, curBlock, liveout, scheduledOps)) {
-        std::string message;
-        llvm::raw_string_ostream rso(message);
-        rso << "Remove dead value " << val << " from PE " << p
-            << " in the current graph.\n";
-        logMessage(rso.str());
         it = curGraph.erase(it);
       } else {
         ++it;
@@ -835,7 +831,6 @@ static std::map<int, PERegUse> getAvailableResourceGraph(
                               (place.regAttr == RegAttr::EX ||
                                place.regAttr == RegAttr::IE);
                      }) != finiGraph.end()) {
-      logMessage(std::to_string(valP.pe) + " for live out\n");
       used[valP.pe] = true;
     }
   }
@@ -971,7 +966,7 @@ static void removeElement(SetVector<unsigned> &vec, unsigned pe) {
     vec.erase(it);
 }
 
-ValuePlacement getSrcValuePlacement(Value src, Operation *op,
+ValuePlacement getSrcValuePlacement(Value src,
                                     std::vector<ValuePlacement> curGraph) {
 
   auto it = std::find_if(curGraph.begin(), curGraph.end(),
@@ -1036,6 +1031,76 @@ SmallVector<Operation *, 4> getRouteOpStep1(Value val) {
   return routeOps;
 }
 
+void getOperandPlacement(Value opr, Operation *scheduleOp,
+                         std::vector<compigra::ValuePlacement> &curGraph,
+                         std::vector<Value> &routeVec,
+                         std::vector<SetVector<unsigned>> &placementVec,
+                         GridAttribute attr, SetVector<Value> spilledVals,
+                         std::map<int, SmallVector<Operation *>> spillOps) {
+  // SetVector<unsigned> fullPESet;
+  // for (auto i = 0; i < attr.nRow * attr.nCol; i++)
+  //   fullPESet.insert(i);
+
+  // first get original value and its placement
+  auto oprPlace = getSrcValuePlacement(opr, curGraph);
+  if (oprPlace.val == nullptr) {
+    // If the oprPlace is a constant, there is no placement limitation
+    // routeVec.push_back(oprPlace.val);
+    // placementVec.push_back(fullPESet);
+    std::string valueStr;
+    llvm::raw_string_ostream rso(valueStr);
+    rso << "ERROR: " << opr << " not found in scheduled result\n";
+    if (!opr.getDefiningOp() || !isa<arith::ConstantOp>(opr.getDefiningOp()))
+      logMessage(rso.str());
+  } else {
+    routeVec.push_back(oprPlace.val);
+    SetVector<unsigned> routingPEs;
+    auto pe = oprPlace.pe;
+    auto regAttr = oprPlace.regAttr;
+    if (regAttr == RegAttr::IN)
+      routingPEs.insert(pe);
+    else if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
+      bool selfRoute =
+          isRouteOp(scheduleOp) && isRouteOp(oprPlace.val.getDefiningOp());
+      for (auto routingPE : getTorusRoutingPEs(pe, attr, !selfRoute))
+        routingPEs.insert(routingPE);
+    }
+    placementVec.push_back(routingPEs);
+  }
+
+  auto rootVal = getRootValue(opr);
+  if (spilledVals.count(rootVal) > 0) {
+    // find corresponding route op in spillOps
+    auto index = std::distance(
+        spilledVals.begin(),
+        std::find_if(spilledVals.begin(), spilledVals.end(),
+                     [&](const Value &v) { return v == rootVal; }));
+    auto spillOpSet = spillOps[index];
+    for (auto op : spillOpSet) {
+      // seek op->getResult(0) in the current graph
+      auto spillOpResult = op->getResult(0);
+      auto spillOpPlace = getSrcValuePlacement(spillOpResult, curGraph);
+      if (spillOpPlace.val == nullptr)
+        continue;
+
+      // check whether the
+      SetVector<unsigned> routingPEs;
+      auto pe = spillOpPlace.pe;
+      auto regAttr = spillOpPlace.regAttr;
+      if (regAttr == RegAttr::IN)
+        routingPEs.insert(pe);
+      else if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
+        bool selfRoute = isRouteOp(scheduleOp) &&
+                         isRouteOp(spillOpPlace.val.getDefiningOp());
+        for (auto routingPE : getTorusRoutingPEs(pe, attr, !selfRoute))
+          routingPEs.insert(routingPE);
+      }
+      routeVec.push_back(spillOpPlace.val);
+      placementVec.push_back(routingPEs);
+    }
+  }
+};
+
 /// Get the valid placement space of the operation.
 std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
     Operation *scheduleOp, std::vector<ValuePlacement> &curGraph,
@@ -1054,13 +1119,11 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
   for (int i = 0; i < nRow * nCol; i++) {
     if (!regUse[i].exAvail)
       continue;
-
     availablePEs.insert(i);
     if (isRouteOp(scheduleOp)) {
       placementSpace.push_back({i, RegAttr::EX});
       continue;
     }
-
     if (regUse[i].inNum > 0)
       placementSpace.push_back({i, RegAttr::IE});
     if (regUse[i].inNum == 0)
@@ -1068,36 +1131,136 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
   }
 
   // limit the placement space according to its consumer and producer
+  std::vector<Value> expandOp0;
+  std::vector<SetVector<unsigned>> spillOp0Ranges;
+
+  std::vector<Value> expandOp1;
+  std::vector<SetVector<unsigned>> spillOp1Ranges;
+
+  std::vector<Value> optOp;
+  std::vector<SetVector<unsigned>> spillOptRanges;
+
   for (auto &opVal : scheduleOp->getOpOperands()) {
     if (usedByBranch(opVal))
       break;
-    SetVector<unsigned> routingPEs;
+
     auto opr = opVal.get();
-    auto oprPlace = getSrcValuePlacement(opr, scheduleOp, curGraph);
-    // not find existing value, no need to limit the placement space
-    if (oprPlace.val == nullptr) {
-
-      std::string valueStr;
-      llvm::raw_string_ostream rso(valueStr);
-      rso << "ERROR: " << opr << " not found in scheduled result\n";
-      if (!opr.getDefiningOp() || !isa<arith::ConstantOp>(opr.getDefiningOp()))
-        logMessage(rso.str());
-      continue;
+    auto oprInd = opVal.getOperandNumber();
+    switch (oprInd) {
+    case 0:
+      getOperandPlacement(opr, scheduleOp, curGraph, expandOp0, spillOp0Ranges,
+                          attr, spilledVals, spillOps);
+      break;
+    case 1:
+      getOperandPlacement(opr, scheduleOp, curGraph, expandOp1, spillOp1Ranges,
+                          attr, spilledVals, spillOps);
+      break;
+    case 2:
+      getOperandPlacement(opr, scheduleOp, curGraph, optOp, spillOptRanges,
+                          attr, spilledVals, spillOps);
+      break;
+    default:
+      break;
     }
-
-    auto pe = oprPlace.pe;
-    auto regAttr = oprPlace.regAttr;
-    if (regAttr == RegAttr::IN)
-      routingPEs.insert(pe);
-    else if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
-      bool selfRoute =
-          isRouteOp(scheduleOp) && isRouteOp(oprPlace.val.getDefiningOp());
-      for (auto routingPE : getTorusRoutingPEs(pe, attr, !selfRoute))
-        routingPEs.insert(routingPE);
-    }
-    // placementSpace intersect routingPEs
-    getSubSet<unsigned>(availablePEs, routingPEs);
   }
+
+  bool existOpr0 = !expandOp0.empty();
+  bool existOpr1 = !expandOp1.empty();
+
+  // if the operands are constant, no need to limit the placement space
+  bool findInterSect = !existOpr0 && !existOpr1;
+  // if expandOp0 is empty, but expandOp1 is not empty, swap them
+  if (!existOpr0 && existOpr1) {
+    std::swap(expandOp0, expandOp1);
+    std::swap(spillOp0Ranges, spillOp1Ranges);
+  }
+
+  // get the spillOp0Ranges and spillOp1Ranges intersection
+  for (auto i = 0; i < spillOp0Ranges.size(); i++) {
+    auto availPEOpr0 = spillOp0Ranges[i];
+    auto schedulePEs = getSubSet<unsigned>(availablePEs, availPEOpr0);
+    findInterSect = !existOpr1;
+    for (auto j = 0; j < spillOp1Ranges.size(); j++) {
+      auto availPEOpr1 = spillOp1Ranges[j];
+      auto schedulePEs1 = getInterSection(schedulePEs, availPEOpr1);
+      if (!schedulePEs1.empty()) {
+        findInterSect = true;
+        schedulePEs = schedulePEs1;
+        scheduleOp->replaceUsesOfWith(expandOp1[0], expandOp1[j]);
+        if (j != 0) {
+          std::string msgReplace;
+          llvm::raw_string_ostream rso(msgReplace);
+          rso << "Replace " << expandOp1[0] << " with " << expandOp1[j]
+              << " in " << *scheduleOp;
+        }
+        break;
+      }
+    }
+    if (findInterSect) {
+      availablePEs = schedulePEs;
+      scheduleOp->replaceUsesOfWith(expandOp0[0], expandOp0[i]);
+      if (i != 0) {
+        std::string msgReplace;
+        llvm::raw_string_ostream rso(msgReplace);
+        rso << "Replace " << expandOp0[0] << " with " << expandOp0[i] << " in "
+            << *scheduleOp;
+        logMessage(rso.str());
+      }
+      break;
+    }
+  }
+  if (!findInterSect)
+    return {};
+
+  // check the optOp
+  if (!optOp.empty()) {
+    logMessage("ERROR: optOp is not empty, this should not happen");
+    findInterSect = false;
+    for (auto i = 0; i < spillOptRanges.size(); i++) {
+      auto availPEOpt = spillOptRanges[i];
+      auto schedulePEs = getSubSet<unsigned>(availablePEs, availPEOpt);
+      if (!schedulePEs.empty()) {
+        scheduleOp->replaceUsesOfWith(optOp[0], optOp[i]);
+        availablePEs = schedulePEs;
+        findInterSect = true;
+        break;
+      }
+    }
+    if (!findInterSect)
+      return {};
+  }
+
+  // for (auto &opVal : scheduleOp->getOpOperands()) {
+  //   if (usedByBranch(opVal))
+  //     break;
+  //   SetVector<unsigned> routingPEs;
+  //   auto opr = opVal.get();
+  //   auto oprPlace = getSrcValuePlacement(opr, curGraph);
+  //   // not find existing value, no need to limit the placement space
+  //   if (oprPlace.val == nullptr) {
+
+  //     std::string valueStr;
+  //     llvm::raw_string_ostream rso(valueStr);
+  //     rso << "ERROR: " << opr << " not found in scheduled result\n";
+  //     if (!opr.getDefiningOp() ||
+  //     !isa<arith::ConstantOp>(opr.getDefiningOp()))
+  //       logMessage(rso.str());
+  //     continue;
+  //   }
+
+  //   auto pe = oprPlace.pe;
+  //   auto regAttr = oprPlace.regAttr;
+  //   if (regAttr == RegAttr::IN)
+  //     routingPEs.insert(pe);
+  //   else if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
+  //     bool selfRoute =
+  //         isRouteOp(scheduleOp) && isRouteOp(oprPlace.val.getDefiningOp());
+  //     for (auto routingPE : getTorusRoutingPEs(pe, attr, !selfRoute))
+  //       routingPEs.insert(routingPE);
+  //   }
+  //   // placementSpace intersect routingPEs
+  //   availablePEs = getSubSet<unsigned>(availablePEs, routingPEs);
+  // }
 
   // Filter placementSpace to keep only PEs that are in routing scope
   placementSpace.erase(
@@ -1119,7 +1282,7 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
       auto pe = it->pe;
       SetVector<unsigned> tempSet;
       tempSet.insert(it->pe);
-      getSubSet<unsigned>(availablePEs, tempSet);
+      availablePEs = getSubSet<unsigned>(availablePEs, tempSet);
 
       if (availablePEs.empty())
         return {};
@@ -1202,11 +1365,11 @@ int BasicBlockOpAssignment::placeOperations(
     tmpScheduledOps.insert(op);
     tmpResult[op] = assignPE;
 
-    std::string message;
-    llvm::raw_string_ostream rso(message);
-    rso << *op << "-> PE: " << assignPE.first
-        << " RegAttr: " << static_cast<int>(assignPE.second) << "\n";
-    logMessage(rso.str());
+    // std::string message;
+    // llvm::raw_string_ostream rso(message);
+    // rso << *op << "-> PE: " << assignPE.first
+    //     << " RegAttr: " << static_cast<int>(assignPE.second) << "\n";
+    // logMessage(rso.str());
   }
 
   for (auto op : tmpScheduledOps) {
@@ -1612,9 +1775,10 @@ double BasicBlockOpAssignment::stepSA(
   // get the total cost
   double currentCost = sucCost + affinityCost + accessCost;
 
-  logMessage("cost: " + std::to_string(sucCost) + " + " +
-             std::to_string(affinityCost) + " + " + std::to_string(accessCost) +
-             " = " + std::to_string(currentCost) + "\n");
+  // logMessage("cost: " + std::to_string(sucCost) + " + " +
+  //            std::to_string(affinityCost) + " + " +
+  //            std::to_string(accessCost) + " = " + std::to_string(currentCost)
+  //            + "\n");
   return currentCost;
 }
 
@@ -1786,7 +1950,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
   int totalOpNum = getNonCstOpSize(curBlock);
   int maxTry = 0;
   auto graphScheduleBefore = initGraph;
-  while (scheduledOps.size() < totalOpNum && maxTry < 35) {
+  while (scheduledOps.size() < totalOpNum && maxTry < 30) {
     maxTry++;
     logMessage("----height: " + std::to_string(height) + "----\n");
 
@@ -1891,6 +2055,15 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
       logMessage(rso.str());
     }
     graphScheduleBefore = graphScheduleAfter;
+    // log graphScheduleBefore
+    std::string curGraph;
+    llvm::raw_string_ostream rso(curGraph);
+    rso << "Graph Schedule Before:\n";
+    for (auto place : graphScheduleBefore) {
+      rso << "  " << place.val << " at PE: " << place.pe
+          << " RegAttr: " << static_cast<int>(place.regAttr) << "\n";
+    }
+    logMessage(rso.str());
 
     for (auto op : schedulingOps) {
       // delay the scheduling
