@@ -608,6 +608,7 @@ static double getAccessCost(
     int height = 0) {
 
   double cost = 0;
+  double coefficient = 1.0;
   for (auto i = 0; i < attr.nRow * attr.nCol; i++) {
     // get the aggregation of the value placement in current PE
     SmallVector<ValuePlacement> liveVals;
@@ -658,11 +659,21 @@ static double getAccessCost(
           mobilityRange.push_back(pe);
       }
 
-      cost += nonScheduledUsers.size() /
-              std::max(0.01, (double)mobilityRange.size());
+      cost += coefficient * (nonScheduledUsers.size() /
+                             std::max(0.01, (double)mobilityRange.size()));
+
+      // logPE and val
+      std::string peStr;
+      llvm::raw_string_ostream peStream(peStr);
+      peStream << "PE: " << pe << " Val: " << val << " RegAttr: " << regAttr;
+      logMessage(peStream.str(), false);
+      logMessage("cost : " + std::to_string(cost) +
+                     " user: " + std::to_string(nonScheduledUsers.size()) +
+                     " mobilityRange: " + std::to_string(mobilityRange.size()),
+                 false);
       // only evaluate cost for the critical operation
       if (isCritical && valPlace.val == criticalOp.val)
-        break;
+        coefficient = 0.5;
     }
   }
   return opNum == 0 ? 0 : 0 + cost / opNum;
@@ -1365,11 +1376,11 @@ int BasicBlockOpAssignment::placeOperations(
     tmpScheduledOps.insert(op);
     tmpResult[op] = assignPE;
 
-    // std::string message;
-    // llvm::raw_string_ostream rso(message);
-    // rso << *op << "-> PE: " << assignPE.first
-    //     << " RegAttr: " << static_cast<int>(assignPE.second) << "\n";
-    // logMessage(rso.str());
+    std::string message;
+    llvm::raw_string_ostream rso(message);
+    rso << *op << "-> PE: " << assignPE.first
+        << " RegAttr: " << static_cast<int>(assignPE.second) << "\n";
+    logMessage(rso.str());
   }
 
   for (auto op : tmpScheduledOps) {
@@ -1775,10 +1786,9 @@ double BasicBlockOpAssignment::stepSA(
   // get the total cost
   double currentCost = sucCost + affinityCost + accessCost;
 
-  // logMessage("cost: " + std::to_string(sucCost) + " + " +
-  //            std::to_string(affinityCost) + " + " +
-  //            std::to_string(accessCost) + " = " + std::to_string(currentCost)
-  //            + "\n");
+  logMessage("cost: " + std::to_string(sucCost) + " + " +
+             std::to_string(affinityCost) + " + " + std::to_string(accessCost) +
+             " = " + std::to_string(currentCost) + "\n");
   return currentCost;
 }
 
@@ -1945,6 +1955,16 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
   // get the schedule priority of the operations in the block
   schedulePriority = getSchedulePriority(curBlock, blockIn, blockOut);
 
+  // print the schedule priority
+  std::string message;
+  llvm::raw_string_ostream rso(message);
+  rso << "Schedule Priority:\n";
+  for (auto [op, priority] : schedulePriority) {
+    rso << *op << " [" << priority.first << " " << priority.second << "]";
+    rso << "\n";
+  }
+  logMessage(rso.str());
+
   int height = 1;
 
   int totalOpNum = getNonCstOpSize(curBlock);
@@ -2020,7 +2040,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
 
       previousCost = bestCost;
     }
-    // logMessage("Best cost: " + std::to_string(bestCost) + "\n");
+    logMessage("Best cost: " + std::to_string(bestCost) + "\n");
 
     // post simulated annealing, check whether graph transformation is needed
     SmallVector<Operation *, 4> graphTransformedOps;
