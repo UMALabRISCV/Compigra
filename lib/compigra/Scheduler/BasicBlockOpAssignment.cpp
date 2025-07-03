@@ -659,19 +659,21 @@ static double getAccessCost(
           mobilityRange.push_back(pe);
       }
 
-      cost += coefficient * (nonScheduledUsers.size() /
-                             std::max(0.01, (double)mobilityRange.size()));
+      if (nonScheduledUsers.size() > mobilityRange.size())
+        cost += coefficient * (nonScheduledUsers.size() /
+                               std::max(0.01, (double)mobilityRange.size()));
 
       // logPE and val
-      std::string peStr;
-      llvm::raw_string_ostream peStream(peStr);
-      peStream << "PE: " << pe << " Val: " << val << " RegAttr: " << regAttr;
-      logMessage(peStream.str(), false);
-      logMessage("cost : " + std::to_string(cost) +
-                     " user: " + std::to_string(nonScheduledUsers.size()) +
-                     " mobilityRange: " + std::to_string(mobilityRange.size()),
-                 false);
-      // only evaluate cost for the critical operation
+      // std::string peStr;
+      // llvm::raw_string_ostream peStream(peStr);
+      // peStream << "PE: " << pe << " Val: " << val << " RegAttr: " << regAttr;
+      // logMessage(peStream.str(), false);
+      // logMessage("cost : " + std::to_string(cost) +
+      //                " user: " + std::to_string(nonScheduledUsers.size()) +
+      //                " mobilityRange: " +
+      //                std::to_string(mobilityRange.size()),
+      //            false);
+      // access for non critical operation with smaller coefficient
       if (isCritical && valPlace.val == criticalOp.val)
         coefficient = 0.5;
     }
@@ -1832,7 +1834,9 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
       // otherwise, route the operation itself
       if (routable == 1) {
         logMessage("Route to consumer\n");
-        if (liveout.count(op->getResult(0)) > 0) {
+        rso << "Warning: Route liveout: " << *op;
+        logMessage(rso.str());
+        if (op->getNumResults() > 0 && liveout.count(op->getResult(0)) > 0) {
           auto newLiveOut = createAtomicMovOp(op->getResult(0), false, false);
           // replace the use if it is used outside the block
           op->getResult(0).replaceUsesWithIf(
