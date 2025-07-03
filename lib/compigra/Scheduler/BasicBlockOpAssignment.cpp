@@ -1186,6 +1186,9 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
   if (!existOpr0 && existOpr1) {
     std::swap(expandOp0, expandOp1);
     std::swap(spillOp0Ranges, spillOp1Ranges);
+    // swap the existOpr0 and existOpr1
+    existOpr0 = true;
+    existOpr1 = false;
   }
 
   // get the spillOp0Ranges and spillOp1Ranges intersection
@@ -1211,8 +1214,8 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
     }
     if (findInterSect) {
       availablePEs = schedulePEs;
-      scheduleOp->replaceUsesOfWith(expandOp0[0], expandOp0[i]);
       if (i != 0) {
+        scheduleOp->replaceUsesOfWith(expandOp0[0], expandOp0[i]);
         std::string msgReplace;
         llvm::raw_string_ostream rso(msgReplace);
         rso << "Replace " << expandOp0[0] << " with " << expandOp0[i] << " in "
