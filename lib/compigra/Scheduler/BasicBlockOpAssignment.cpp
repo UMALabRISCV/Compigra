@@ -1962,7 +1962,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
   // re-schedule
   // TODO[@YY]: official rollback
   if (transformed) {
-    height = std::max(rollBackHeight, height - longestRoutePath);
+    height = std::max(rollBackHeight, height - longestRoutePath + 1);
     logMessage("Rollback to height: " + std::to_string(height) + "\n");
   } else {
     height = height + 1;
@@ -2007,6 +2007,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
   int totalOpNum = getNonCstOpSize(curBlock);
   int maxTry = 0;
   auto graphScheduleBefore = initGraph;
+  transformGraphs[0] = initGraph;
   while (scheduledOps.size() < totalOpNum && maxTry < 30) {
     maxTry++;
     logMessage("----height: " + std::to_string(height) + "----\n");
@@ -2092,7 +2093,15 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
         return failure();
 
       if (rollbackHeight <= height) {
-        // rollBack to rollbackHeight
+        // rollback solution and scheduledOps
+        for (auto sol : solution) {
+          if (sol.second.time >= rollbackHeight) {
+            scheduledOps.remove(sol.first);
+            solution.erase(sol.first);
+          }
+        }
+        graphScheduleBefore = transformGraphs[rollbackHeight - 1];
+        height = rollbackHeight;
         continue;
       }
     }
@@ -2113,6 +2122,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
       logMessage(rso.str());
     }
     graphScheduleBefore = graphScheduleAfter;
+    transformGraphs[height] = graphScheduleBefore;
     // log graphScheduleBefore
     std::string curGraph;
     llvm::raw_string_ostream rso(curGraph);
