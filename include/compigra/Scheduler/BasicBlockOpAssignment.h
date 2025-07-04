@@ -83,6 +83,9 @@ private:
   std::vector<ValuePlacement> startEmbeddingGraph;
   std::vector<ValuePlacement> finiEmbeddingGraph;
 
+  // A map to store embedding graph at each time slot.
+  std::map<int, std::vector<ValuePlacement>> transformGraphs;
+
   SetVector<Value> liveout;
   SetVector<Value> livein;
 
