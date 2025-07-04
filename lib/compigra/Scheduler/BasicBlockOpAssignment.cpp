@@ -659,7 +659,8 @@ static double getAccessCost(
           mobilityRange.push_back(pe);
       }
 
-      if (nonScheduledUsers.size() > mobilityRange.size())
+      if (regAttr == RegAttr::IN ||
+          nonScheduledUsers.size() > mobilityRange.size())
         cost += coefficient * (nonScheduledUsers.size() /
                                std::max(0.01, (double)mobilityRange.size()));
 
@@ -1246,38 +1247,6 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
       return {};
   }
 
-  // for (auto &opVal : scheduleOp->getOpOperands()) {
-  //   if (usedByBranch(opVal))
-  //     break;
-  //   SetVector<unsigned> routingPEs;
-  //   auto opr = opVal.get();
-  //   auto oprPlace = getSrcValuePlacement(opr, curGraph);
-  //   // not find existing value, no need to limit the placement space
-  //   if (oprPlace.val == nullptr) {
-
-  //     std::string valueStr;
-  //     llvm::raw_string_ostream rso(valueStr);
-  //     rso << "ERROR: " << opr << " not found in scheduled result\n";
-  //     if (!opr.getDefiningOp() ||
-  //     !isa<arith::ConstantOp>(opr.getDefiningOp()))
-  //       logMessage(rso.str());
-  //     continue;
-  //   }
-
-  //   auto pe = oprPlace.pe;
-  //   auto regAttr = oprPlace.regAttr;
-  //   if (regAttr == RegAttr::IN)
-  //     routingPEs.insert(pe);
-  //   else if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
-  //     bool selfRoute =
-  //         isRouteOp(scheduleOp) && isRouteOp(oprPlace.val.getDefiningOp());
-  //     for (auto routingPE : getTorusRoutingPEs(pe, attr, !selfRoute))
-  //       routingPEs.insert(routingPE);
-  //   }
-  //   // placementSpace intersect routingPEs
-  //   availablePEs = getSubSet<unsigned>(availablePEs, routingPEs);
-  // }
-
   // Filter placementSpace to keep only PEs that are in routing scope
   placementSpace.erase(
       std::remove_if(placementSpace.begin(), placementSpace.end(),
@@ -1285,7 +1254,6 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
                        return availablePEs.count(p.first) == 0;
                      }),
       placementSpace.end());
-
   if (placementSpace.empty())
     return placementSpace;
 
@@ -1304,13 +1272,45 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
         return {};
     }
   }
-
   placementSpace.erase(
       std::remove_if(placementSpace.begin(), placementSpace.end(),
                      [&](const std::pair<unsigned, RegAttr> &p) {
                        return availablePEs.count(p.first) == 0;
                      }),
       placementSpace.end());
+
+  // if the operation is used and only used by a conditional branch, it is
+  bool usedForCond =
+      scheduleOp->hasOneUse() &&
+      scheduleOp->getUses().begin()->getOperandNumber() < 2 &&
+      isa<cgra::ConditionalBranchOp>(*(scheduleOp->getUsers().begin()));
+  if (usedForCond) {
+    auto useNum = scheduleOp->getUses().begin()->getOperandNumber();
+    auto user = *(scheduleOp->getUsers().begin());
+    bool condCst =
+        isa<arith::AddIOp>(scheduleOp) &&
+        scheduleOp->getOperand(0).getDefiningOp() &&
+        isa<arith::ConstantOp>(scheduleOp->getOperand(0).getDefiningOp()) &&
+        scheduleOp->getOperand(1).getDefiningOp() &&
+        isa<arith::ConstantOp>(scheduleOp->getOperand(1).getDefiningOp());
+    // get the other operand of the user
+    auto opr1 = user->getOperand(useNum == 0 ? 1 : 0);
+    // if find opr1 in the curGraph, get its placement
+    auto opr1Place = getSrcValuePlacement(opr1, curGraph);
+    auto it = std::find_if(placementSpace.begin(), placementSpace.end(),
+                           [&](const std::pair<unsigned, RegAttr> &p) {
+                             return p.first == opr1Place.pe;
+                           });
+    if (opr1Place.val != nullptr && it != placementSpace.end()) {
+      //  only keep it in placementSpace
+      placementSpace.erase(
+          std::remove_if(placementSpace.begin(), placementSpace.end(),
+                         [&](const std::pair<unsigned, RegAttr> &p) {
+                           return p.first != opr1Place.pe;
+                         }),
+          placementSpace.end());
+    }
+  }
 
   return placementSpace;
 }
@@ -1804,6 +1804,8 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
     std::vector<compigra::ValuePlacement> &curGraph,
     std::vector<compigra::ValuePlacement> &finiGraph) {
   bool transformed = false;
+  int rollBackHeight = height;
+  int longestRoutePath = 0;
   for (auto op : graphTransformedOps) {
     logMessage("Try to solve the graph transformation");
     unsigned producerNum = op->getNumOperands();
@@ -1812,11 +1814,29 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
     // detect whether the operation is routable
     bool routable = createRoutePath(op, producers, movs, curGraph, finiGraph,
                                     graphTransformedOps);
+    longestRoutePath = std::max(
+        longestRoutePath, (int)*std::max_element(movs.begin(), movs.end()));
     logMessage("routable: " + std::to_string(routable) + "\n");
     if (routable >= 0) {
       std::string message;
       llvm::raw_string_ostream rso(message);
       if (routable == 0 && !isRouteOp(op)) {
+        int earliestTime = height;
+        for (auto [idx, prodOp] : llvm::enumerate(producers)) {
+          if (prodOp.val.getDefiningOp() &&
+              isa<arith::ConstantOp>(prodOp.val.getDefiningOp())) {
+            // if the producer is a constant, it can be scheduled at time 0
+            continue;
+          }
+
+          bool initArg = isa<BlockArgument>(prodOp.val) ||
+                         (prodOp.val.getParentBlock() != curBlock);
+          auto prodTime =
+              initArg ? 0 : solution.at(prodOp.val.getDefiningOp()).time;
+          earliestTime = std::min(earliestTime, prodTime + 1);
+        }
+        rollBackHeight = std::min(rollBackHeight, earliestTime);
+
         logMessage("Route producers\n");
         unsigned newRouteOpsNum = 0;
         auto newRouteOps = routeOperation(producers, movs, op);
@@ -1941,9 +1961,19 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
 
   // re-schedule
   // TODO[@YY]: official rollback
-  if (!transformed)
+  if (transformed) {
+    height = std::max(rollBackHeight, height - longestRoutePath);
+    logMessage("Rollback to height: " + std::to_string(height) + "\n");
+  } else {
     height = height + 1;
+  }
   return success();
+}
+
+static bool acceptStep(double bestCost, double currentCost) {
+  // Generate a random number between 0 and 1
+  double accept = static_cast<double>(rand()) / RAND_MAX;
+  return currentCost < bestCost && accept <= 0.9;
 }
 
 LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
@@ -2002,7 +2032,6 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
                blockOut, finiGraph, attr);
     auto layerScheduleResult = tmpScheduleResult;
     auto graphScheduleAfter = tmpGraph;
-
     double bestCost = currentCost;
 
     // simulated annealing to create a loop that get random
@@ -2024,9 +2053,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
           stepSA(height, schedulingOps, tmpScheduleResult, tmpGraph,
                  searchSpace, blockOut, finiGraph, attr, shuffleOpIdx);
 
-      // Generate a random number between 0 and 1
-      double accept = static_cast<double>(rand()) / RAND_MAX;
-      if (currentCost < bestCost && accept <= 0.9) {
+      if (acceptStep(bestCost, currentCost)) {
         bestCost = currentCost;
         graphScheduleAfter = tmpGraph;
         layerScheduleResult = tmpScheduleResult;
@@ -2042,10 +2069,10 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
           std::abs(bestCost - std::accumulate(lastThreeCosts.begin(),
                                               lastThreeCosts.end(), 0.0) /
                                   lastThreeCosts.size()) < 1e-3) {
-        break; // Step out if the state is stable
+        break;
       }
 
-      previousCost = bestCost;
+      previousCost = currentCost;
     }
     logMessage("Best cost: " + std::to_string(bestCost) + "\n");
 
@@ -2057,13 +2084,17 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
         graphTransformedOps.push_back(op);
     }
 
+    int rollbackHeight = height;
     if (!graphTransformedOps.empty()) {
-      int rollbackHeight = height;
-      postSchedulingGraphTransformation(rollbackHeight, totalOpNum, liveIns,
-                                        liveOuts, graphTransformedOps,
-                                        graphScheduleBefore, finiGraph);
-      if (rollbackHeight == height)
+      if (failed(postSchedulingGraphTransformation(
+              rollbackHeight, totalOpNum, liveIns, liveOuts,
+              graphTransformedOps, graphScheduleBefore, finiGraph)))
+        return failure();
+
+      if (rollbackHeight <= height) {
+        // rollBack to rollbackHeight
         continue;
+      }
     }
 
     // prepare scheduling for the next layer
