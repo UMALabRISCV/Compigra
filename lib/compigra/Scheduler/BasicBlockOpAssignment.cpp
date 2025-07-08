@@ -705,7 +705,7 @@ static double getSpatialAffinityTotalCost(
     Block *curBlk, std::map<Operation *, ScheduleUnit> scheduleResult,
     std::vector<ValuePlacement> curGraph, std::vector<ValuePlacement> finiGraph,
     std::map<Operation *, std::pair<int, int>> heightMap, GridAttribute grid,
-    SetVector<Value> liveOut, SetVector<Operation *> scheduledOps) {
+    SetVector<Value> liveOut, SetVector<Operation *> scheduledOps, int height) {
   double cost = 0;
   int count = 0;
   for (auto op : scheduleResult) {
@@ -717,10 +717,13 @@ static double getSpatialAffinityTotalCost(
           !isLive(place.val, curBlk, liveOut, scheduledOps))
         continue;
 
-      cost += getSpatialAffinityCost(
+      auto affCost = getSpatialAffinityCost(
           place.val, {0, (int)place.pe, -1}, op.first->getResult(0), op.second,
           heightMap, finiGraph, grid, op.first->getBlock());
-      count++;
+      if (affCost > 0)
+        count++;
+
+      cost += affCost;
     }
   }
 
@@ -1435,7 +1438,7 @@ int shuffleSearchSpace(
     if (it2 != scheduleResult.end())
       scheduleResult.erase(it2);
   }
-  // logMessage("shuffleOpIdx:" + std::to_string(shuffleOpIdx));
+  logMessage("shuffleOpIdx:" + std::to_string(shuffleOpIdx));
   return shuffleOpIdx;
 }
 
@@ -1784,7 +1787,7 @@ double BasicBlockOpAssignment::stepSA(
       getSuccessCost(tmpScheduleResult, schedulePriority, schedulingOps);
   double affinityCost = getSpatialAffinityTotalCost(
       curBlock, tmpScheduleResult, tmpGraph, finiGraph, schedulePriority, attr,
-      liveOut, scheduledOps);
+      liveOut, scheduledOps, height);
   double accessCost = getAccessCost(
       curBlock, tmpGraph, tmpScheduleResult, scheduledOps, liveOut, finiGraph,
       attr, schedulingOps.size(), schedulePriority, height);
@@ -1845,7 +1848,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         transformed = true;
         // if the op is already a route operation, but not scheduled, don't
         // create new route ops
-        updateSchedulePriority(height, liveIns, liveOuts);
+        // updateSchedulePriority(height, liveIns, liveOuts);
         for (size_t i = 0; i < producers.size(); ++i) {
           auto producer = producers[i];
           auto movNum = movs[i];
@@ -1962,8 +1965,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
   // re-schedule
   // TODO[@YY]: official rollback
   if (transformed) {
-    height = std::max(rollBackHeight, height - longestRoutePath + 1);
-    logMessage("Rollback to height: " + std::to_string(height) + "\n");
+    height = std::max(rollBackHeight, height - longestRoutePath);
   } else {
     height = height + 1;
   }
@@ -2066,10 +2068,14 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
         lastThreeCosts.erase(lastThreeCosts.begin());
 
       // Check if the last three states are stable
-      if (iter > 10 &&
-          std::abs(bestCost - std::accumulate(lastThreeCosts.begin(),
-                                              lastThreeCosts.end(), 0.0) /
-                                  lastThreeCosts.size()) < 1e-3) {
+      auto costAvg =
+          std::accumulate(lastThreeCosts.begin(), lastThreeCosts.end(), 0.0) /
+          lastThreeCosts.size();
+      double maxDiff = 0;
+      for (auto cost : lastThreeCosts) {
+        maxDiff = std::max(maxDiff, std::abs(cost - costAvg));
+      }
+      if (iter > 10 && std::abs(bestCost - costAvg) < 1e-3 && maxDiff > 1e-7) {
         break;
       }
 
@@ -2102,11 +2108,14 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
         }
         graphScheduleBefore = transformGraphs[rollbackHeight - 1];
         height = rollbackHeight;
+        updateSchedulePriority(height, liveIns, liveOuts);
+        logMessage("Rollback to height: " + std::to_string(height) + "\n");
         continue;
       }
     }
 
     // prepare scheduling for the next layer
+    logMessage("Time = " + std::to_string(height));
     for (auto [op, res] : layerScheduleResult) {
       // remove it from the schedulingOps
       auto it = std::find(schedulingOps.begin(), schedulingOps.end(), op);
