@@ -99,6 +99,7 @@ arith::ConstantOp getZeroConstant(Region &region, OpBuilder &builder,
   }
 
   // if zeroOp is not found, create a new one
+  builder.setInsertionPointAfter(&region.front().front());
   if (!zeroOp && !isFloat) {
     zeroOp = builder.create<arith::ConstantOp>(
         region.getLoc(), builder.getI32Type(), builder.getI32IntegerAttr(0));
