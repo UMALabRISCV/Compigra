@@ -544,7 +544,7 @@ struct FastASMGenTemporalCGRAPass
     asmGen.setSolution(rawSolution);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";
-      // return signalPassFailure();
+      return signalPassFailure();
     }
     asmGen.printKnownSchedule(true, 0, outDir);
   };
