@@ -599,6 +599,91 @@ ValuePlacement *getOccupiedValue(std::vector<ValuePlacement> curGraph,
   return nullptr;
 }
 
+// static double getAccessCost(
+//     Block *curBlk, std::vector<ValuePlacement> curGraph,
+//     std::map<Operation *, ScheduleUnit> scheduleResult,
+//     SetVector<Operation *> scheduledOps, SetVector<Value> liveOut,
+//     std::vector<ValuePlacement> finiGraph, GridAttribute &attr, size_t opNum,
+//     const std::map<mlir::Operation *, std::pair<int, int>> schedulePriority,
+//     int height = 0) {
+
+//   double cost = 0;
+//   double coefficient = 1.0;
+//   for (auto i = 0; i < attr.nRow * attr.nCol; i++) {
+//     // get the aggregation of the value placement in current PE
+//     SmallVector<ValuePlacement> liveVals;
+//     bool isCritical = false;
+//     ValuePlacement criticalOp;
+//     for (auto valPlace : curGraph) {
+//       if (valPlace.pe == i) {
+//         auto defOp = valPlace.val.getDefiningOp();
+//         isCritical = defOp && schedulePriority.count(defOp) &&
+//                      (schedulePriority.at(defOp).first ==
+//                       schedulePriority.at(defOp).second);
+//         if (isCritical) {
+//           criticalOp = valPlace;
+//           isCritical = true;
+//         } else {
+//           liveVals.push_back(valPlace);
+//         }
+//       }
+//     }
+
+//     // if criticalOp exist, insert it to the begin of liveVals
+//     if (isCritical)
+//       liveVals.insert(liveVals.begin(), criticalOp);
+
+//     // Evaluate the access cost in current PE
+//     for (auto valPlace : liveVals) {
+//       auto val = valPlace.val;
+//       auto regAttr = valPlace.regAttr;
+//       auto pe = valPlace.pe;
+//       SetVector<Operation *> nonScheduledUsers;
+//       for (auto user : val.getUsers()) {
+//         if (user->getBlock() != curBlk || isa<cf::BranchOp>(user) ||
+//             (isa<cgra::ConditionalBranchOp>(user) &&
+//              user->getOperand(0) != val && user->getOperand(1) != val))
+//           continue;
+//         if (scheduledOps.count(user) == 0 && scheduleResult.count(user) == 0)
+//           nonScheduledUsers.insert(user);
+//       }
+
+//       // search available mobility range
+//       std::vector<unsigned> mobilityRange;
+//       if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
+//         for (auto routingPE : getTorusRoutingPEs(pe, attr))
+//           if (!isOccupied(curGraph, finiGraph, routingPE))
+//             mobilityRange.push_back(routingPE);
+//       } else if (regAttr == RegAttr::IN) {
+//         if (!isOccupied(curGraph, finiGraph, pe))
+//           mobilityRange.push_back(pe);
+//       }
+
+//       if (regAttr == RegAttr::IN ||
+//           nonScheduledUsers.size() > mobilityRange.size())
+//         cost += coefficient * (nonScheduledUsers.size() /
+//                                std::max(0.01, (double)mobilityRange.size()));
+
+//       // logPE and val
+//       // std::string peStr;
+//       // llvm::raw_string_ostream peStream(peStr);
+//       // peStream << "PE: " << pe << " Val: " << val << " RegAttr: " <<
+//       regAttr;
+//       // logMessage(peStream.str(), false);
+//       // logMessage("cost : " + std::to_string(cost) +
+//       //                " user: " + std::to_string(nonScheduledUsers.size())
+//       +
+//       //                " mobilityRange: " +
+//       //                std::to_string(mobilityRange.size()),
+//       //            false);
+//       // access for non critical operation with smaller coefficient
+//       if (isCritical && valPlace.val == criticalOp.val)
+//         coefficient = 0.5;
+//     }
+//   }
+//   return opNum == 0 ? 0 : 0 + cost / opNum;
+// }
+
 static double getAccessCost(
     Block *curBlk, std::vector<ValuePlacement> curGraph,
     std::map<Operation *, ScheduleUnit> scheduleResult,
@@ -606,80 +691,59 @@ static double getAccessCost(
     std::vector<ValuePlacement> finiGraph, GridAttribute &attr, size_t opNum,
     const std::map<mlir::Operation *, std::pair<int, int>> schedulePriority,
     int height = 0) {
-
   double cost = 0;
-  double coefficient = 1.0;
+
   for (auto i = 0; i < attr.nRow * attr.nCol; i++) {
     // get the aggregation of the value placement in current PE
     SmallVector<ValuePlacement> liveVals;
-    bool isCritical = false;
+    bool blockedPE = isOccupied(curGraph, finiGraph, i);
     ValuePlacement criticalOp;
     for (auto valPlace : curGraph) {
-      if (valPlace.pe == i) {
-        auto defOp = valPlace.val.getDefiningOp();
-        isCritical = defOp && schedulePriority.count(defOp) &&
-                     (schedulePriority.at(defOp).first ==
-                      schedulePriority.at(defOp).second);
-        if (isCritical) {
-          criticalOp = valPlace;
-          isCritical = true;
-        } else {
-          liveVals.push_back(valPlace);
-        }
-      }
+      if (valPlace.pe != i || valPlace.regAttr != RegAttr::IN)
+        continue;
+      liveVals.push_back(valPlace);
+      // auto defOp = valPlace.val.getDefiningOp();
+      // isCritical = defOp && schedulePriority.count(defOp) &&
+      //              (schedulePriority.at(defOp).first ==
+      //               schedulePriority.at(defOp).second);
     }
 
-    // if criticalOp exist, insert it to the begin of liveVals
-    if (isCritical)
-      liveVals.insert(liveVals.begin(), criticalOp);
-
-    // Evaluate the access cost in current PE
-    for (auto valPlace : liveVals) {
-      auto val = valPlace.val;
-      auto regAttr = valPlace.regAttr;
-      auto pe = valPlace.pe;
+    for (auto val : liveVals) {
+      // get the non-scheduled users of the value
       SetVector<Operation *> nonScheduledUsers;
-      for (auto user : val.getUsers()) {
+      for (auto user : val.val.getUsers()) {
         if (user->getBlock() != curBlk || isa<cf::BranchOp>(user) ||
             (isa<cgra::ConditionalBranchOp>(user) &&
-             user->getOperand(0) != val && user->getOperand(1) != val))
+             user->getOperand(0) != val.val && user->getOperand(1) != val.val))
           continue;
         if (scheduledOps.count(user) == 0 && scheduleResult.count(user) == 0)
           nonScheduledUsers.insert(user);
       }
 
-      // search available mobility range
-      std::vector<unsigned> mobilityRange;
-      if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
-        for (auto routingPE : getTorusRoutingPEs(pe, attr))
-          if (!isOccupied(curGraph, finiGraph, routingPE))
-            mobilityRange.push_back(routingPE);
-      } else if (regAttr == RegAttr::IN) {
-        if (!isOccupied(curGraph, finiGraph, pe))
-          mobilityRange.push_back(pe);
+      // the access cost of value in internal register is 2^(schedulePriority.)
+      double accessCost = 0;
+      for (auto user : nonScheduledUsers) {
+        int scheduleHeight = (schedulePriority.at(user).first +
+                              schedulePriority.at(user).second) /
+                             2;
+        double coef = blockedPE ? 2 : 1;
+        // if the value is not co-consumed by other operations, the coefficient
+        // is 0.1;
+        for (auto opr : user->getOperands()) {
+          if (opr.getDefiningOp() &&
+              isa<arith::ConstantOp>(opr.getDefiningOp())) {
+            coef = 0.1;
+          }
+        }
+        double userCost = std::pow(2, height - scheduleHeight);
+
+        accessCost += coef * userCost;
       }
-
-      if (regAttr == RegAttr::IN ||
-          nonScheduledUsers.size() > mobilityRange.size())
-        cost += coefficient * (nonScheduledUsers.size() /
-                               std::max(0.01, (double)mobilityRange.size()));
-
-      // logPE and val
-      // std::string peStr;
-      // llvm::raw_string_ostream peStream(peStr);
-      // peStream << "PE: " << pe << " Val: " << val << " RegAttr: " << regAttr;
-      // logMessage(peStream.str(), false);
-      // logMessage("cost : " + std::to_string(cost) +
-      //                " user: " + std::to_string(nonScheduledUsers.size()) +
-      //                " mobilityRange: " +
-      //                std::to_string(mobilityRange.size()),
-      //            false);
-      // access for non critical operation with smaller coefficient
-      if (isCritical && valPlace.val == criticalOp.val)
-        coefficient = 0.5;
+      cost += accessCost;
     }
   }
-  return opNum == 0 ? 0 : 0 + cost / opNum;
+
+  return cost;
 }
 
 static double getSuccessCost(
@@ -1438,7 +1502,7 @@ int shuffleSearchSpace(
     if (it2 != scheduleResult.end())
       scheduleResult.erase(it2);
   }
-  logMessage("shuffleOpIdx:" + std::to_string(shuffleOpIdx));
+  // logMessage("shuffleOpIdx:" + std::to_string(shuffleOpIdx));
   return shuffleOpIdx;
 }
 
@@ -1817,10 +1881,10 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
     // detect whether the operation is routable
     bool routable = createRoutePath(op, producers, movs, curGraph, finiGraph,
                                     graphTransformedOps);
-    longestRoutePath = std::max(
-        longestRoutePath, (int)*std::max_element(movs.begin(), movs.end()));
     logMessage("routable: " + std::to_string(routable) + "\n");
     if (routable >= 0) {
+      longestRoutePath = std::max(
+          longestRoutePath, (int)*std::max_element(movs.begin(), movs.end()));
       std::string message;
       llvm::raw_string_ostream rso(message);
       if (routable == 0 && !isRouteOp(op)) {
@@ -1886,9 +1950,8 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
           liveout.insert(newLiveOut->getResult(0));
           auto &parentRegion = *(curBlock->getParent());
           computeLiveValue(parentRegion, liveIns, liveOuts);
-          transformed = true;
-          updateSchedulePriority(height, liveIns, liveOuts);
           totalOpNum++;
+          return success();
         }
       }
     } else {
@@ -1906,7 +1969,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         if (!occupied)
           avaiPEs.insert(i);
       }
-      bool success = true;
+      bool routeBlockSuccess = true;
       unsigned newRouteOpsNum = 0;
       for (auto blockProd : blockedProdPEs) {
         // try to route the occupied value to other PEs;
@@ -1917,7 +1980,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         SetVector<unsigned> cntPESet(cntPEs.begin(), cntPEs.end());
         auto intersection = getInterSection<unsigned>(cntPESet, avaiPEs);
         if (intersection.empty())
-          success = false;
+          routeBlockSuccess = false;
 
         // otherwise, route the blocked PE
         auto blockPlace = getOccupiedValue(curGraph, finiGraph, scheduledOps,
@@ -1950,20 +2013,18 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
                         use.getOperandNumber() > 1));
             });
       }
-      if (!success) {
+      if (!routeBlockSuccess) {
         rso << "Error: Failed to route the blocked PEs, graph "
                "transformation is needed.\n";
         // TODO[@Y]: split the graph via DFG
         return failure();
       }
-      updateSchedulePriority(height, liveIns, liveOuts);
+      height += 1;
       totalOpNum += newRouteOpsNum;
     }
   }
-  // logMessage(rso.str());
 
   // re-schedule
-  // TODO[@YY]: official rollback
   if (transformed) {
     height = std::max(rollBackHeight, height - longestRoutePath);
   } else {
@@ -2097,10 +2158,12 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
               rollbackHeight, totalOpNum, liveIns, liveOuts,
               graphTransformedOps, graphScheduleBefore, finiGraph)))
         return failure();
+      // update schedule priority after graph transformation
+      updateSchedulePriority(height, liveIns, liveOuts);
 
       if (rollbackHeight <= height) {
         // rollback solution and scheduledOps
-        for (auto sol : solution) {
+        for (auto sol : llvm::make_early_inc_range(solution)) {
           if (sol.second.time >= rollbackHeight) {
             scheduledOps.remove(sol.first);
             solution.erase(sol.first);
@@ -2108,7 +2171,6 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
         }
         graphScheduleBefore = transformGraphs[rollbackHeight - 1];
         height = rollbackHeight;
-        updateSchedulePriority(height, liveIns, liveOuts);
         logMessage("Rollback to height: " + std::to_string(height) + "\n");
         continue;
       }
