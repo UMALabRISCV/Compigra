@@ -116,6 +116,10 @@ private:
                                std::vector<ValuePlacement> &initGraph,
                                OpBuilder &builder, GridAttribute attr);
 
+  void finalizeEmbeddingGraphWithLiveOut(
+      std::vector<ValuePlacement> &finiGraph,
+      std::vector<ValuePlacement> &endScheduleGraph);
+
   Operation *createAtomicMovOp(Value val, bool replaceCurBlkUse,
                                bool customLoc);
 
