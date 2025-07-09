@@ -563,10 +563,10 @@ bool isOccupied(std::vector<ValuePlacement> curGraph,
   return false;
 };
 
-ValuePlacement *getOccupiedValue(std::vector<ValuePlacement> curGraph,
-                                 std::vector<ValuePlacement> finiGraph,
-                                 SetVector<mlir::Operation *> scheduledOps,
-                                 Block *curBlk, unsigned pe) {
+ValuePlacement getOccupiedValue(std::vector<ValuePlacement> curGraph,
+                                std::vector<ValuePlacement> finiGraph,
+                                SetVector<mlir::Operation *> scheduledOps,
+                                Block *curBlk, unsigned pe) {
   for (auto place : curGraph) {
     bool taken = (place.pe == pe) && (place.regAttr == RegAttr::EX);
     // check whether the value is still in use
@@ -581,22 +581,22 @@ ValuePlacement *getOccupiedValue(std::vector<ValuePlacement> curGraph,
         inUse = true;
     }
     if (taken && inUse) {
-      return &place;
+      return place;
     }
     auto val = place.val;
     // Check if the value exists in finiGraph with regAttr=EX|IE
     auto it = std::find_if(finiGraph.begin(), finiGraph.end(),
                            [&](const ValuePlacement &finiPlace) {
                              return finiPlace.val == val &&
+                                    finiPlace.pe == pe &&
                                     (finiPlace.regAttr == RegAttr::EX ||
                                      finiPlace.regAttr == RegAttr::IE);
                            });
     if (it != finiGraph.end()) {
-      llvm::errs() << "LiveOut\n";
-      return &(*it);
+      return (*it);
     }
   }
-  return nullptr;
+  return ValuePlacement{};
 }
 
 static double getAccessCost(
@@ -798,6 +798,7 @@ static SetVector<unsigned> getAvailablePEs(std::map<int, PERegUse> &freeReg,
   }
   return peList;
 }
+
 static std::map<int, PERegUse>
 getResourceGraph(std::vector<ValuePlacement> curGraph, GridAttribute &attr) {
   // get available slots
@@ -1524,7 +1525,6 @@ int BasicBlockOpAssignment::createRoutePath(
         weight[ind]++;
   }
   sortProducersByWeight(producers, weight);
-  // print producer and their weight
 
   // get the available PEs
   SetVector<unsigned> avaiPEs;
@@ -1532,17 +1532,18 @@ int BasicBlockOpAssignment::createRoutePath(
     auto occupied =
         getOccupiedValue(curGraph, finiGraph, scheduledOps, curBlock, i);
     // if the pe is occupied but not by the producer, return false
-    if (occupied && prodPEs.count(i) > 0) {
+    if (occupied.val && prodPEs.count(i) > 0) {
       std::string message;
       llvm::raw_string_ostream rso(message);
-      rso << "Occupied PE: " << occupied->val << " at " << occupied->pe
+      rso << *failOp << "\n";
+      rso << i << " Occupied PE: " << occupied.val << " at " << occupied.pe
           << " by producer\n";
       logMessage(rso.str());
       //  if the producer PE is occupied by other value, we need to route the
       //  other value
       bool blockPop = false;
       for (auto prod : producers) {
-        if (prod.val == occupied->val) {
+        if (prod.val == occupied.val) {
           blockPop = true;
           break;
         }
@@ -1551,7 +1552,7 @@ int BasicBlockOpAssignment::createRoutePath(
         blockedProdPEs.insert(i);
       }
     }
-    if (!occupied)
+    if (occupied.val == nullptr)
       avaiPEs.insert(i);
   }
   if (!blockedProdPEs.empty()) {
@@ -1815,8 +1816,8 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
     std::vector<ValuePlacement> producers;
     std::vector<unsigned> movs;
     // detect whether the operation is routable
-    bool routable = createRoutePath(op, producers, movs, curGraph, finiGraph,
-                                    graphTransformedOps);
+    int routable = createRoutePath(op, producers, movs, curGraph, finiGraph,
+                                   graphTransformedOps);
     logMessage("routable: " + std::to_string(routable) + "\n");
     if (routable >= 0) {
       longestRoutePath = std::max(
@@ -1902,7 +1903,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
       for (auto i = 0; i < attr.nRow * attr.nCol; i++) {
         auto occupied =
             getOccupiedValue(curGraph, finiGraph, scheduledOps, curBlock, i);
-        if (!occupied)
+        if (occupied.val == nullptr)
           avaiPEs.insert(i);
       }
       bool routeBlockSuccess = true;
@@ -1923,8 +1924,8 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
                                            curBlock, blockProd);
 
         // not create double route
-        if (blockPlace->val.getDefiningOp() &&
-            isRouteOp(blockPlace->val.getDefiningOp())) {
+        if (blockPlace.val.getDefiningOp() &&
+            isRouteOp(blockPlace.val.getDefiningOp())) {
           continue;
         }
 
@@ -1932,14 +1933,14 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         // log the block Place
         std::string message;
         llvm::raw_string_ostream rso1(message);
-        rso << "Blocked PE: " << blockPlace->val << " ^^^ " << blockPlace->pe
+        rso << "Blocked PE: " << blockPlace.val << " ^^^ " << blockPlace.pe
             << "\n";
         logMessage(rso1.str());
         // builder.setInsertionPoint
-        auto freePEOp = createAtomicMovOp(blockPlace->val, false, false);
+        auto freePEOp = createAtomicMovOp(blockPlace.val, false, false);
         newRouteOpsNum++;
         // replace the use of blockPlace->val with freePEOp
-        blockPlace->val.replaceUsesWithIf(
+        blockPlace.val.replaceUsesWithIf(
             freePEOp->getResult(0), [&](OpOperand &use) {
               auto owner = use.getOwner();
               return owner->getBlock() == curBlock && owner != freePEOp &&

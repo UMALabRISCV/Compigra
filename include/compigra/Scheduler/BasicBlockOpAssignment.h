@@ -55,7 +55,7 @@ struct GridAttribute {
 /// Describes the spatial placement of a value in the CGRA, which includes the
 /// pe and the register attribute.
 struct ValuePlacement {
-  Value val;
+  Value val = nullptr;
   unsigned pe = UINT_MAX;
   RegAttr regAttr;
 };
