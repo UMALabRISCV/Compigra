@@ -1027,6 +1027,23 @@ void BasicBlockOpAssignment::initEmbeddingGraphWithLiveIn(
   // if val not in initGraph, assign the liveIn value with the lowest cost
 }
 
+void BasicBlockOpAssignment::finalizeEmbeddingGraphWithLiveOut(
+    std::vector<ValuePlacement> &finiGraph,
+    std::vector<ValuePlacement> &endScheduleGraph) {
+  for (auto place : endScheduleGraph) {
+    // if the value is not in the finiGraph, add it to the finiGraph
+    auto it =
+        std::find_if(finiGraph.begin(), finiGraph.end(),
+                     [&](ValuePlacement p) { return p.val == place.val; });
+    if (it == finiGraph.end()) {
+      // change the regAttr to IN
+      auto newPlace = place;
+      newPlace.regAttr = RegAttr::IN;
+      finiGraph.push_back(newPlace);
+    }
+  }
+}
+
 static void removeElement(SetVector<unsigned> &vec, unsigned pe) {
   auto it = std::find(vec.begin(), vec.end(), pe);
   if (it != vec.end())
@@ -1753,24 +1770,6 @@ void BasicBlockOpAssignment::updateCDFG(Block *scheduleBB,
                                         std::vector<ValuePlacement> finiGraph) {
   // update the initGraph and finiGraph
   startEmbeddingGraph = initGraph;
-
-  // the register in the finiGraph are considered
-  for (auto &place : finiGraph) {
-    if (place.regAttr == RegAttr::IN)
-      continue;
-
-    if (place.val.getParentBlock() == scheduleBB) {
-      // the all user locates in the successors of the scheduleBB, it can be
-      // external live
-      bool allUserInSucBB =
-          llvm::all_of(place.val.getUsers(), [&](Operation *user) {
-            return llvm::is_contained(scheduleBB->getSuccessors(),
-                                      user->getBlock());
-          });
-      if (!allUserInSucBB)
-        place.regAttr = RegAttr::IN;
-    }
-  }
   finiEmbeddingGraph = finiGraph;
 }
 
@@ -2151,7 +2150,8 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     height++;
   }
 
-  finiGraph = graphScheduleBefore;
+  // finiGraph = graphScheduleBefore;
+  finalizeEmbeddingGraphWithLiveOut(finiGraph, graphScheduleBefore);
 
   if (scheduledOps.size() < totalOpNum)
     return failure();
