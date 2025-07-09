@@ -56,7 +56,7 @@ struct GridAttribute {
 /// pe and the register attribute.
 struct ValuePlacement {
   Value val;
-  unsigned pe;
+  unsigned pe = UINT_MAX;
   RegAttr regAttr;
 };
 
