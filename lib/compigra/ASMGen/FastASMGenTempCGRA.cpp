@@ -413,6 +413,49 @@ void calculateTemporalSpatialSchedule(
   llvm::errs() << "Temporal spatial schedule is saved to " << fileName << "\n";
 }
 
+void optimizeAcrossBBValuePlacement(
+    int nRow, int nCol, std::map<Block *, SetVector<Value>> liveIns,
+    std::map<Block *, SetVector<Value>> liveOuts,
+    std::map<Block *, std::vector<ValuePlacement>> &bbInitGraphs,
+    std::map<Block *, std::vector<ValuePlacement>> &bbFiniGraphs) {
+  DenseSet<Value> allLiveValues;
+  for (auto &[blk, liveIn] : liveIns) {
+    for (auto val : liveIn)
+      allLiveValues.insert(val);
+  }
+
+  for (auto &[blk, liveOut] : liveOuts) {
+    for (auto val : liveOut)
+      allLiveValues.insert(val);
+  }
+
+  DenseMap<int, SetVector<Value>> nodes;
+  DenseSet<Value> visited;
+  for (auto val : allLiveValues) {
+    if (visited.count(val) > 0)
+      continue;
+    SetVector<Value> relatedVals;
+    getAllPhiRelatedValues(val, relatedVals);
+
+    for (auto v : relatedVals) {
+      visited.insert(v);
+    }
+    nodes[nodes.size()] = relatedVals;
+  }
+  // log nodes
+  std::string message;
+  llvm::raw_string_ostream rso(message);
+  rso << "Nodes:\n";
+  for (auto &[index, vals] : nodes) {
+    rso << "index: " << index << "\n";
+    for (auto val : vals) {
+      rso << val << " ";
+    }
+    rso << "\n";
+  }
+  logMessage(rso.str());
+}
+
 namespace {
 struct FastASMGenTemporalCGRAPass
     : public compigra::impl::FastASMGenTemporalCGRABase<
@@ -443,6 +486,10 @@ struct FastASMGenTemporalCGRAPass
     int bbId = 0;
 
     logMessage("BasicBlock op assignment\n", true);
+    // initialize the initGraph and finiGraph for each block
+    optimizeAcrossBBValuePlacement(nRow, nCol, liveIns, liveOuts, bbInitGraphs,
+                                   bbFiniGraphs);
+
     std::map<mlir::Operation *, compigra::ScheduleUnit> rawSolution;
 
     for (auto &bb : region.getBlocks()) {
