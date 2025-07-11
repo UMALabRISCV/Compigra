@@ -370,7 +370,13 @@ void updateGlobalValPlacement(
                              bbInitGraphs, bbFiniGraphs);
   }
 
-  // finish update
+  // remove dead values from the global value placement
+  for (auto &[blk, graph] : bbInitGraphs) {
+    removeDeadValue(graph, liveIns[blk]);
+  }
+  for (auto &[blk, graph] : bbFiniGraphs) {
+    removeDeadValue(graph, liveOuts[blk]);
+  }
 }
 
 void calculateTemporalSpatialSchedule(
@@ -571,7 +577,7 @@ struct FastASMGenTemporalCGRAPass
       bbInitGraphs[&bb] = initGraph;
       bbFiniGraphs[&bb] = finiGraph;
       // update the liveIn and liveOut with the initGraph and finiGraph
-      computeLiveValue(region, liveIns, liveOuts);
+      // computeLiveValue(region, liveIns, liveOuts);
       updateGlobalValPlacement(&bb, region, liveIns, liveOuts, bbInitGraphs,
                                bbFiniGraphs);
       logMessage("InitGraph: ");
