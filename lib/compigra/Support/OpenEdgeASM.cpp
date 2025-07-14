@@ -351,14 +351,14 @@ LogicalResult compigra::allocateOutRegInPE(
 
     if (solution[defOp].reg >= 0) {
       graph.colorMap[v] = solution[defOp].reg;
-      LLVM_DEBUG(llvm::dbgs()
-                 << v << ": " << std::to_string(graph.colorMap[v]) << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "PRE-COLORED " << v << ": "
+                              << std::to_string(graph.colorMap[v]) << "\n");
       continue;
     }
 
     if (graph.colorMap.find(v) != graph.colorMap.end()) {
-      LLVM_DEBUG(llvm::dbgs()
-                 << v << ": " << std::to_string(graph.colorMap[v]) << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "ASSIGNED " << v << ": "
+                              << std::to_string(graph.colorMap[v]) << "\n");
       solution[defOp].reg = graph.colorMap[v];
       continue;
     }

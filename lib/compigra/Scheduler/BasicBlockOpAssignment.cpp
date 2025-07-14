@@ -256,6 +256,14 @@ static bool usedByBranch(OpOperand &use) {
          (isa<cgra::ConditionalBranchOp>(user) && use.getOperandNumber() > 1);
 }
 
+static bool usedByBranch(Value val) {
+  for (auto &use : val.getUses()) {
+    if (usedByBranch(use))
+      return true;
+  }
+  return false;
+}
+
 static SmallVector<Operation *, 4>
 getPreviousLayerOps(Block *block, SetVector<Value> &liveout,
                     std::set<Operation *> &ancestors) {
@@ -290,6 +298,23 @@ getPreviousLayerOps(Block *block, SetVector<Value> &liveout,
     }
   }
   return visitedOps;
+}
+
+static std::optional<Value> generateNewPhiVal(Operation *op,
+                                              SetVector<Value> liveIn) {
+  if (op->getNumResults() == 0)
+    return std::nullopt;
+
+  auto res = op->getResult(0);
+  SetVector<Value> relatedVal;
+  getAllPhiRelatedValues(res, relatedVal);
+  for (auto val : relatedVal) {
+    // if the value is in the liveIn set, return it
+    if (liveIn.count(val) > 0) {
+      return val;
+    }
+  }
+  return std::nullopt;
 }
 
 /// Compute the schedule priority of the operations in the block. The earliest
@@ -329,6 +354,26 @@ static std::map<Operation *, std::pair<int, int>> getSchedulePriority(
         continue;
       if (prevPriority.count(op) && earliest < prevPriority[op].first)
         continue;
+
+      auto phiVal = generateNewPhiVal(op, liveIn);
+      if (phiVal.has_value()) {
+        auto arg = phiVal.value();
+        // all users in the block of arg should be scheduled before the op
+        bool hasNonScheduledUser = false;
+        for (auto &use : arg.getUses()) {
+          auto user = use.getOwner();
+          if (user->getBlock() != block || usedByBranch(use) || user == op)
+            continue;
+          if (visitedOps.count(user) == 0) {
+            hasNonScheduledUser = true;
+            break;
+          }
+        }
+
+        if (hasNonScheduledUser)
+          continue;
+      }
+
       schedulePriority[op] = {earliest, INT_MAX};
       visitedOps.insert(op);
     }
@@ -1318,10 +1363,10 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
     if (!regUse[i].exAvail)
       continue;
     availablePEs.insert(i);
-    if (isRouteOp(scheduleOp)) {
-      placementSpace.push_back({i, RegAttr::EX});
-      continue;
-    }
+    // if (isRouteOp(scheduleOp)) {
+    //   placementSpace.push_back({i, RegAttr::EX});
+    //   continue;
+    // }
     if (regUse[i].inNum > 0)
       placementSpace.push_back({i, RegAttr::IE});
     if (regUse[i].inNum == 0)
@@ -2110,8 +2155,8 @@ static bool acceptStep(double bestCost, double currentCost) {
 LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     std::map<Block *, SetVector<Value>> &liveIns,
     std::map<Block *, SetVector<Value>> &liveOuts, ScheduleStrategy strategy) {
-  auto blockIn = liveIns[curBlock];
-  auto blockOut = liveOuts[curBlock];
+  // auto blockIn = liveIns[curBlock];
+  // auto blockOut = liveOuts[curBlock];
   setUpLiveness(liveIns, liveOuts);
 
   auto initGraph = startEmbeddingGraph;
@@ -2120,7 +2165,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
   initEmbeddingGraphWithLiveIn(liveIns, liveOuts, initGraph, builder, attr);
 
   // get the schedule priority of the operations in the block
-  schedulePriority = getSchedulePriority(curBlock, blockIn, blockOut);
+  schedulePriority = getSchedulePriority(curBlock, livein, liveout);
 
   // print the schedule priority
   std::string message;
@@ -2160,7 +2205,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     // Initial placement
     double currentCost =
         stepSA(height, schedulingOps, tmpScheduleResult, tmpGraph, searchSpace,
-               blockOut, finiGraph, attr);
+               liveout, finiGraph, attr);
     auto layerScheduleResult = tmpScheduleResult;
     auto graphScheduleAfter = tmpGraph;
     double bestCost = currentCost;
@@ -2187,7 +2232,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
 
       double currentCost =
           stepSA(height, schedulingOps, tmpScheduleResult, tmpGraph,
-                 searchSpace, blockOut, finiGraph, attr, shuffleOpIdx);
+                 searchSpace, liveout, finiGraph, attr, shuffleOpIdx);
 
       if (acceptStep(bestCost, currentCost)) {
         bestCost = currentCost;
