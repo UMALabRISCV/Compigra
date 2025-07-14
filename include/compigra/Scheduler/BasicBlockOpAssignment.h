@@ -104,6 +104,7 @@ private:
   /// The operations that are blocked from being pop out,
   // WRITE-ONLY by createRoutePath function
   SetVector<unsigned> blockedProdPEs;
+  std::map<Operation *, std::map<int, std::pair<Value, Value>>> replaceValMap;
 
   /// Initialize the embedding graph, where the key is the [time slot, PE], the
   /// value indicates the value placed in the graph and its register attribute.
@@ -116,9 +117,14 @@ private:
                                std::vector<ValuePlacement> &initGraph,
                                OpBuilder &builder, GridAttribute attr);
 
-  void finalizeEmbeddingGraphWithLiveOut(
+  LogicalResult finalizeEmbeddingGraphWithLiveOut(
       std::vector<ValuePlacement> &finiGraph,
       std::vector<ValuePlacement> &endScheduleGraph);
+
+  LogicalResult adaptWithFinalPlacement(
+      OpBuilder &builder, ValuePlacement targetPlace, ValuePlacement curPlace,
+      SmallVector<ValuePlacement> existVals, SetVector<Value> liveout,
+      unsigned maxRegNum, std::map<Operation *, ScheduleUnit> &scheduleResult);
 
   Operation *createAtomicMovOp(Value val, bool replaceCurBlkUse,
                                bool customLoc);
