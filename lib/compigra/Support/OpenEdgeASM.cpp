@@ -520,6 +520,7 @@ LogicalResult OpenEdgeASMGen::allocateRegisters(
 
   for (auto [op, sol] : solution) {
     if (op->getNumResults() > 0 && sol.reg == -1) {
+      LLVM_DEBUG(llvm::dbgs() << *op << "Register = -1\n");
       return failure();
     }
     instSolution[op].name = op->getName().getStringRef().str();
@@ -529,8 +530,10 @@ LogicalResult OpenEdgeASMGen::allocateRegisters(
   }
 
   // write register allocation results to instructions
-  if (failed(convertToInstructionMap()))
+  if (failed(convertToInstructionMap())) {
+    LLVM_DEBUG(llvm::dbgs() << "Failed to convert to instruction map\n");
     return failure();
+  }
 
   return success();
 }
@@ -669,8 +672,11 @@ LogicalResult OpenEdgeASMGen::convertToInstructionMap() {
         inst.opA =
             getOperandSrcReg(unit.pe, solution[producerA].pe,
                              solution[producerA].reg, nRow, nCol, maxReg);
-      else
+      else {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "Failed to find operand 0 for " << *op << "\n");
         return failure();
+      }
     }
 
     if (op->getNumOperands() > leftId + 1 && inst.opB == "Unknown") {
@@ -683,8 +689,11 @@ LogicalResult OpenEdgeASMGen::convertToInstructionMap() {
         inst.opB =
             getOperandSrcReg(unit.pe, solution[producerB].pe,
                              solution[producerB].reg, nRow, nCol, maxReg);
-      else
+      else {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "Failed to find operand 1 for " << *op << "\n");
         return failure();
+      }
     }
 
     instSolution[op] = inst;

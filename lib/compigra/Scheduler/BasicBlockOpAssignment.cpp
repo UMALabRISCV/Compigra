@@ -552,13 +552,11 @@ bool isOccupied(std::vector<ValuePlacement> curGraph,
     auto it = std::find_if(finiGraph.begin(), finiGraph.end(),
                            [&](const ValuePlacement &finiPlace) {
                              return finiPlace.val == val &&
-                                    (finiPlace.regAttr == RegAttr::EX ||
-                                     finiPlace.regAttr == RegAttr::IE);
+                                    finiPlace.pe == pe &&
+                                    finiPlace.regAttr == RegAttr::EX;
                            });
 
-    if (taken || it != finiGraph.end()) {
-      return true;
-    }
+    return taken || it != finiGraph.end();
   }
   return false;
 };
@@ -589,8 +587,7 @@ ValuePlacement getOccupiedValue(std::vector<ValuePlacement> curGraph,
                            [&](const ValuePlacement &finiPlace) {
                              return finiPlace.val == val &&
                                     finiPlace.pe == pe &&
-                                    (finiPlace.regAttr == RegAttr::EX ||
-                                     finiPlace.regAttr == RegAttr::IE);
+                                    (finiPlace.regAttr == RegAttr::EX);
                            });
     if (it != finiGraph.end()) {
       return (*it);
@@ -831,6 +828,9 @@ void BasicBlockOpAssignment::updateEmbeddingGraph(
   totalScheduledOp.insert(tmpScheduledOps.begin(), tmpScheduledOps.end());
   // op takes place of pe, invalidate the Rout of the pe
   for (auto op : tmpScheduledOps) {
+    if (op->getNumResults() == 0)
+      continue;
+
     auto pe = tmpResult[op].first;
     RegAttr regAttr = tmpResult[op].second;
 
@@ -895,8 +895,7 @@ static std::map<int, PERegUse> getAvailableResourceGraph(
     if (std::find_if(finiGraph.begin(), finiGraph.end(),
                      [&](const ValuePlacement &place) {
                        return place.val == val &&
-                              (place.regAttr == RegAttr::EX ||
-                               place.regAttr == RegAttr::IE);
+                              (place.regAttr == RegAttr::EX);
                      }) != finiGraph.end()) {
       used[valP.pe] = true;
     }
@@ -951,7 +950,7 @@ static void printResourceGraph(std::map<int, PERegUse> freeReg,
   logMessage(message);
 }
 
-static int getInitialLiveInPlacement(
+static ValuePlacement getInitialLiveInPlacement(
     Value in, Block *block, std::vector<ValuePlacement> &initGraph,
     const std::map<Block *, SetVector<Value>> liveIns,
     const std::map<Block *, SetVector<Value>> liveOuts, GridAttribute &attr) {
@@ -982,7 +981,7 @@ static int getInitialLiveInPlacement(
 
   // pe is randomly assigned from the available PE list
   unsigned pe = peList[rand() % peList.size()];
-  initGraph.push_back({in, pe, regAttr});
+  // initGraph.push_back({in, pe, regAttr});
   // update the freeReg
   if (regAttr == RegAttr::IN || regAttr == RegAttr::IE)
     freeReg[pe].inNum--;
@@ -995,6 +994,7 @@ static int getInitialLiveInPlacement(
 
   logMessage("INIT GRAPH: " + rso.str() + " " + std::to_string(pe) + " " +
              std::to_string(static_cast<int>(regAttr)));
+  return ValuePlacement{in, pe, regAttr};
 }
 
 void BasicBlockOpAssignment::initEmbeddingGraphWithLiveIn(
@@ -1005,12 +1005,16 @@ void BasicBlockOpAssignment::initEmbeddingGraphWithLiveIn(
 
   auto liveIn = liveIns[curBlock];
   for (auto val : liveIn) {
+    ValuePlacement place;
     auto it = std::find_if(initGraph.begin(), initGraph.end(),
                            [&](ValuePlacement p) { return p.val == val; });
     // randomly assign the PE to the liveIn value
     if (it == initGraph.end()) {
-      getInitialLiveInPlacement(val, curBlock, initGraph, liveIns, liveOuts,
-                                attr);
+      place = getInitialLiveInPlacement(val, curBlock, initGraph, liveIns,
+                                        liveOuts, attr);
+      initGraph.push_back(place);
+    } else {
+      place = *it;
     }
 
     // if find in the internal register in the liveIn graph, pop it out
@@ -1018,7 +1022,7 @@ void BasicBlockOpAssignment::initEmbeddingGraphWithLiveIn(
     for (auto user : val.getUsers())
       if (user->getBlock() == curBlock)
         userCount++;
-    if (userCount >= 3) {
+    if (userCount >= 3 && place.regAttr == RegAttr::IN) {
       // create pop out operation
       builder.setInsertionPoint(&curBlock->getOperations().front());
       Operation *movOp = createAtomicMovOp(val, true, true);
@@ -1027,21 +1031,158 @@ void BasicBlockOpAssignment::initEmbeddingGraphWithLiveIn(
   // if val not in initGraph, assign the liveIn value with the lowest cost
 }
 
-void BasicBlockOpAssignment::finalizeEmbeddingGraphWithLiveOut(
+LogicalResult BasicBlockOpAssignment::adaptWithFinalPlacement(
+    OpBuilder &builder, ValuePlacement targetPlace, ValuePlacement curPlace,
+    SmallVector<ValuePlacement> existVals, SetVector<Value> liveout,
+    unsigned maxRegNum, std::map<Operation *, ScheduleUnit> &scheduleResult) {
+  if (targetPlace.val != curPlace.val || targetPlace.pe != curPlace.pe)
+    return failure();
+  if (targetPlace.regAttr == curPlace.regAttr ||
+      curPlace.regAttr == RegAttr::IE)
+    return success();
+
+  auto curPE = curPlace.pe;
+  if (curPlace.regAttr == RegAttr::EX) {
+    // check whether enough registers to store the existVals
+    // count how many existVals are in liveout
+    int liveoutCount = 0;
+    for (auto val : existVals) {
+      if (liveout.count(val.val) > 0)
+        liveoutCount++;
+    }
+    if (liveoutCount >= maxRegNum)
+      return failure();
+
+    return success();
+  }
+
+  if (curPlace.regAttr == RegAttr::IN) {
+    // find the last scheduled operation
+    Operation *lastProducer;
+    int lastOpTime = 0;
+    int bbEndTime = scheduleResult[curBlock->getTerminator()].time;
+    DenseSet<int> occupiedTime;
+    for (auto [op, sol] : scheduleResult) {
+      if (sol.pe != curPE)
+        continue;
+      occupiedTime.insert(sol.time);
+      if (op->getNumResults() > 0 && sol.time > lastOpTime) {
+        lastOpTime = sol.time;
+        lastProducer = op;
+      }
+    }
+
+    int popTime = 1;
+    if (lastProducer) {
+      if (lastProducer && scheduleResult.count(lastProducer)) {
+        // insert when the consumer in this block consumes this op
+        for (auto &use : lastProducer->getResult(0).getUses()) {
+          auto user = use.getOwner();
+          llvm::errs() << "CHECK POP Use: " << *user << "\n";
+          // if not current block user, skip
+          if (user->getBlock() != curBlock || usedByBranch(use))
+            continue;
+
+          // if used inside current pe, skip as internal register can be used
+          if (scheduleResult.count(user) &&
+              scheduleResult.at(user).pe == curPE) {
+            continue;
+          }
+
+          popTime = std::max(popTime, scheduleResult.at(user).time);
+          logMessage("outside PE user : " + std::to_string(popTime));
+        }
+      }
+    }
+
+    int findSlot = -1;
+    popTime = std::max(popTime, lastOpTime + 1);
+    for (auto i = popTime; i <= bbEndTime; i++) {
+      if (occupiedTime.count(i) == 0) {
+        findSlot = i;
+        popTime = i;
+        break;
+      }
+    }
+    if (findSlot == -1) {
+      // make the original bbEndTime as the popTime
+      popTime = bbEndTime;
+      Operation *delayOp = nullptr;
+      for (auto [op, sol] : scheduleResult) {
+        if (sol.pe == curPE && sol.time == bbEndTime)
+          delayOp = op;
+      }
+      // the original bbEndTime operation execution time+1;
+      scheduleResult[delayOp].time = bbEndTime + 1;
+      scheduleResult[curBlock->getTerminator()].time = bbEndTime + 1;
+    }
+    logMessage("Pop time: " + std::to_string(popTime) + " " +
+               std::to_string(bbEndTime));
+    if (lastProducer) {
+      builder.setInsertionPoint(lastProducer);
+    } else {
+      builder.setInsertionPoint(
+          &curPlace.val.getParentBlock()->getOperations().front());
+    }
+    // pop the curPlace.val at popTime
+    Operation *popOp = createAtomicMovOp(curPlace.val, false, false);
+    int reg = targetPlace.regAttr == RegAttr::EX ? maxRegNum : -1;
+    scheduleResult[popOp] = {popTime, (int)curPlace.pe, reg};
+    // curPlace.val.replaceUsesWithIf(popOp->getResult(0), [&](OpOperand &use) {
+    //   auto owner = use.getOwner();
+    //   return owner->getBlock() != curBlock ||
+    //          (owner->getBlock() == curBlock &&
+    //           (isa<cf::BranchOp>(owner) ||
+    //            (isa<cgra::ConditionalBranchOp>(owner) &&
+    //             use.getOperandNumber() > 1)));
+    // });
+    std::string message;
+    llvm::raw_string_ostream rso(message);
+    rso << "Pop out " << curPlace.val << " at time " << popTime << " in PE "
+        << curPlace.pe << " with " << *popOp << "\n";
+    logMessage(rso.str());
+  }
+
+  return success();
+}
+
+LogicalResult BasicBlockOpAssignment::finalizeEmbeddingGraphWithLiveOut(
     std::vector<ValuePlacement> &finiGraph,
     std::vector<ValuePlacement> &endScheduleGraph) {
   for (auto place : endScheduleGraph) {
     // if the value is not in the finiGraph, add it to the finiGraph
+    auto pe = place.pe;
     auto it =
         std::find_if(finiGraph.begin(), finiGraph.end(),
                      [&](ValuePlacement p) { return p.val == place.val; });
     if (it == finiGraph.end()) {
       // change the regAttr to IN
       auto newPlace = place;
-      newPlace.regAttr = RegAttr::IN;
+      // if in finiGraph, there is already EX or IE placement, change the
+      // regAttr to IN
+      for (auto p : finiGraph) {
+        if (p.pe == pe &&
+            (p.regAttr == RegAttr::EX || p.regAttr == RegAttr::IE)) {
+          newPlace.regAttr = RegAttr::IN;
+          break;
+        }
+      }
+      // newPlace.regAttr = RegAttr::IN;
       finiGraph.push_back(newPlace);
+    } else {
+      // endScheduleGraph must match with finiGraph
+      SmallVector<ValuePlacement> existVals;
+      for (auto p : endScheduleGraph) {
+        if (p.pe == pe && p.val != place.val)
+          existVals.push_back(p);
+      }
+      // adapt the targetPlace with the existVals
+      if (failed(adaptWithFinalPlacement(builder, *it, place, existVals,
+                                         liveout, attr.maxReg, solution)))
+        return failure();
     }
   }
+  return success();
 }
 
 static void removeElement(SetVector<unsigned> &vec, unsigned pe) {
@@ -1052,7 +1193,6 @@ static void removeElement(SetVector<unsigned> &vec, unsigned pe) {
 
 ValuePlacement getSrcValuePlacement(Value src,
                                     std::vector<ValuePlacement> curGraph) {
-
   auto it = std::find_if(curGraph.begin(), curGraph.end(),
                          [&](ValuePlacement p) { return p.val == src; });
 
@@ -1141,7 +1281,7 @@ void getOperandPlacement(Value opr, Operation *scheduleOp,
       if (spillOpPlace.val == nullptr)
         continue;
 
-      // check whether the
+      // check whether the routing PE provide accessibility
       SetVector<unsigned> routingPEs;
       auto pe = spillOpPlace.pe;
       auto regAttr = spillOpPlace.regAttr;
@@ -1247,25 +1387,17 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
       if (!schedulePEs1.empty()) {
         findInterSect = true;
         schedulePEs = schedulePEs1;
-        scheduleOp->replaceUsesOfWith(expandOp1[0], expandOp1[j]);
-        if (j != 0) {
-          std::string msgReplace;
-          llvm::raw_string_ostream rso(msgReplace);
-          rso << "Replace " << expandOp1[0] << " with " << expandOp1[j]
-              << " in " << *scheduleOp;
-        }
+        if (j != 0)
+          replaceValMap[scheduleOp][1] = {expandOp1[0], expandOp1[j]};
+        // scheduleOp->replaceUsesOfWith(expandOp1[0], expandOp1[j]);
         break;
       }
     }
     if (findInterSect) {
       availablePEs = schedulePEs;
       if (i != 0) {
-        scheduleOp->replaceUsesOfWith(expandOp0[0], expandOp0[i]);
-        std::string msgReplace;
-        llvm::raw_string_ostream rso(msgReplace);
-        rso << "Replace " << expandOp0[0] << " with " << expandOp0[i] << " in "
-            << *scheduleOp;
-        logMessage(rso.str());
+        replaceValMap[scheduleOp][0] = {expandOp0[0], expandOp0[i]};
+        // scheduleOp->replaceUsesOfWith(expandOp0[0], expandOp0[i]);
       }
       break;
     }
@@ -1283,7 +1415,9 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
       auto availPEOpt = spillOptRanges[i];
       auto schedulePEs = getSubSet<unsigned>(availablePEs, availPEOpt);
       if (!schedulePEs.empty()) {
-        scheduleOp->replaceUsesOfWith(optOp[0], optOp[i]);
+        if (i != 0)
+          replaceValMap[scheduleOp][2] = {optOp[0], optOp[i]};
+        // scheduleOp->replaceUsesOfWith(optOp[0], optOp[i]);
         availablePEs = schedulePEs;
         findInterSect = true;
         break;
@@ -1326,37 +1460,37 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
       placementSpace.end());
 
   // if the operation is used and only used by a conditional branch, it is
-  bool usedForCond =
-      scheduleOp->hasOneUse() &&
-      scheduleOp->getUses().begin()->getOperandNumber() < 2 &&
-      isa<cgra::ConditionalBranchOp>(*(scheduleOp->getUsers().begin()));
-  if (usedForCond) {
-    auto useNum = scheduleOp->getUses().begin()->getOperandNumber();
-    auto user = *(scheduleOp->getUsers().begin());
-    bool condCst =
-        isa<arith::AddIOp>(scheduleOp) &&
-        scheduleOp->getOperand(0).getDefiningOp() &&
-        isa<arith::ConstantOp>(scheduleOp->getOperand(0).getDefiningOp()) &&
-        scheduleOp->getOperand(1).getDefiningOp() &&
-        isa<arith::ConstantOp>(scheduleOp->getOperand(1).getDefiningOp());
-    // get the other operand of the user
-    auto opr1 = user->getOperand(useNum == 0 ? 1 : 0);
-    // if find opr1 in the curGraph, get its placement
-    auto opr1Place = getSrcValuePlacement(opr1, curGraph);
-    auto it = std::find_if(placementSpace.begin(), placementSpace.end(),
-                           [&](const std::pair<unsigned, RegAttr> &p) {
-                             return p.first == opr1Place.pe;
-                           });
-    if (opr1Place.val != nullptr && it != placementSpace.end()) {
-      //  only keep it in placementSpace
-      placementSpace.erase(
-          std::remove_if(placementSpace.begin(), placementSpace.end(),
-                         [&](const std::pair<unsigned, RegAttr> &p) {
-                           return p.first != opr1Place.pe;
-                         }),
-          placementSpace.end());
-    }
-  }
+  // bool usedForCond =
+  //     scheduleOp->hasOneUse() &&
+  //     scheduleOp->getUses().begin()->getOperandNumber() < 2 &&
+  //     isa<cgra::ConditionalBranchOp>(*(scheduleOp->getUsers().begin()));
+  // if (usedForCond) {
+  //   auto useNum = scheduleOp->getUses().begin()->getOperandNumber();
+  //   auto user = *(scheduleOp->getUsers().begin());
+  //   bool condCst =
+  //       isa<arith::AddIOp>(scheduleOp) &&
+  //       scheduleOp->getOperand(0).getDefiningOp() &&
+  //       isa<arith::ConstantOp>(scheduleOp->getOperand(0).getDefiningOp()) &&
+  //       scheduleOp->getOperand(1).getDefiningOp() &&
+  //       isa<arith::ConstantOp>(scheduleOp->getOperand(1).getDefiningOp());
+  //   // get the other operand of the user
+  //   auto opr1 = user->getOperand(useNum == 0 ? 1 : 0);
+  //   // if find opr1 in the curGraph, get its placement
+  //   auto opr1Place = getSrcValuePlacement(opr1, curGraph);
+  //   auto it = std::find_if(placementSpace.begin(), placementSpace.end(),
+  //                          [&](const std::pair<unsigned, RegAttr> &p) {
+  //                            return p.first == opr1Place.pe;
+  //                          });
+  //   if (opr1Place.val != nullptr && it != placementSpace.end()) {
+  //     //  only keep it in placementSpace
+  //     placementSpace.erase(
+  //         std::remove_if(placementSpace.begin(), placementSpace.end(),
+  //                        [&](const std::pair<unsigned, RegAttr> &p) {
+  //                          return p.first != opr1Place.pe;
+  //                        }),
+  //         placementSpace.end());
+  //   }
+  // }
 
   return placementSpace;
 }
@@ -1380,7 +1514,6 @@ int BasicBlockOpAssignment::placeOperations(
     std::vector<ValuePlacement> &curGraph,
     std::map<Operation *, std::vector<placeunit>> &space,
     std::vector<ValuePlacement> &finiGraph, int shuffleOpIdx) {
-
   unsigned suc = 0;
   std::map<Operation *, std::pair<unsigned, RegAttr>> tmpResult;
   SetVector<Operation *> tmpScheduledOps;
@@ -1737,7 +1870,6 @@ BasicBlockOpAssignment::routeOperation(std::vector<ValuePlacement> producers,
 void BasicBlockOpAssignment::updateSchedulePriority(
     int timeSlot, std::map<Block *, SetVector<Value>> liveIns,
     std::map<Block *, SetVector<Value>> liveOuts) {
-
   auto newSchedulePriority =
       getSchedulePriority(curBlock, liveIns[curBlock], liveOuts[curBlock],
                           timeSlot, schedulePriority);
@@ -1781,6 +1913,7 @@ double BasicBlockOpAssignment::stepSA(
     SetVector<Value> liveOut, std::vector<ValuePlacement> &finiGraph,
     GridAttribute attr, int shuffleOpIdx) {
   // Initial placement
+  replaceValMap.clear();
   int suc = placeOperations(height, schedulingOps, tmpScheduleResult, tmpGraph,
                             existSpace, finiGraph, shuffleOpIdx);
   double sucCost =
@@ -1977,7 +2110,6 @@ static bool acceptStep(double bestCost, double currentCost) {
 LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     std::map<Block *, SetVector<Value>> &liveIns,
     std::map<Block *, SetVector<Value>> &liveOuts, ScheduleStrategy strategy) {
-
   auto blockIn = liveIns[curBlock];
   auto blockOut = liveOuts[curBlock];
   setUpLiveness(liveIns, liveOuts);
@@ -2033,6 +2165,11 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     auto graphScheduleAfter = tmpGraph;
     double bestCost = currentCost;
 
+    for (auto [op, replaceUse] : replaceValMap)
+      for (auto [_, pair] : replaceUse)
+        // replace the use of op with the pair.first
+        op->replaceUsesOfWith(pair.first, pair.second);
+
     // simulated annealing to create a loop that get random
     // placement, record status, cost and determine the final placement
     int iterSA = 200;
@@ -2056,6 +2193,10 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
         bestCost = currentCost;
         graphScheduleAfter = tmpGraph;
         layerScheduleResult = tmpScheduleResult;
+        for (auto [op, replaceUse] : replaceValMap)
+          for (auto [_, pair] : replaceUse)
+            // replace the use of op with the pair.first
+            op->replaceUsesOfWith(pair.first, pair.second);
       }
 
       // Track the last three costs
@@ -2150,8 +2291,8 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     height++;
   }
 
-  // finiGraph = graphScheduleBefore;
-  finalizeEmbeddingGraphWithLiveOut(finiGraph, graphScheduleBefore);
+  if (failed(finalizeEmbeddingGraphWithLiveOut(finiGraph, graphScheduleBefore)))
+    return failure();
 
   if (scheduledOps.size() < totalOpNum)
     return failure();
