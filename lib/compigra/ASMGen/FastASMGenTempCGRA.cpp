@@ -506,7 +506,7 @@ struct FastASMGenTemporalCGRAPass
       llvm::errs() << "BBId: " + std::to_string(bbId) +
                           "==============================\n";
       // Init operation assginer
-      BasicBlockOpAssignment bbOpAssignment(&bb, 3, nRow, nCol, builder);
+      BasicBlockOpAssignment bbOpAssignment(&bb, 4, nRow, nCol, builder);
       auto zeroIntOp = getZeroConstant(region, builder);
       auto zeroFloatOp = getZeroConstant(region, builder, true);
       bbOpAssignment.setUpZeroOp(zeroIntOp, zeroFloatOp);
