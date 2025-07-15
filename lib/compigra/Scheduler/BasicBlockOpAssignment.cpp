@@ -663,10 +663,9 @@ static double getAccessCost(
     for (auto val : liveVals) {
       // get the non-scheduled users of the value
       SetVector<Operation *> nonScheduledUsers;
-      for (auto user : val.val.getUsers()) {
-        if (user->getBlock() != curBlk || isa<cf::BranchOp>(user) ||
-            (isa<cgra::ConditionalBranchOp>(user) &&
-             user->getOperand(0) != val.val && user->getOperand(1) != val.val))
+      for (auto &use : val.val.getUses()) {
+        auto user = use.getOwner();
+        if (user->getBlock() != curBlk || usedByBranch(use))
           continue;
         if (scheduledOps.count(user) == 0 && scheduleResult.count(user) == 0)
           nonScheduledUsers.insert(user);
@@ -1363,7 +1362,7 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
     if (!regUse[i].exAvail)
       continue;
     availablePEs.insert(i);
-    // if (isRouteOp(scheduleOp)) {
+    // if (isRouteOp(scheduleOp) && !liveout.count(scheduleOp->getResult(0))) {
     //   placementSpace.push_back({i, RegAttr::EX});
     //   continue;
     // }
@@ -1950,6 +1949,29 @@ void BasicBlockOpAssignment::updateCDFG(Block *scheduleBB,
   finiEmbeddingGraph = finiGraph;
 }
 
+double getLocalPopCost(SmallVector<Operation *, 4> &schedulingOps,
+                       std::map<Operation *, ScheduleUnit> &tmpScheduleResult,
+                       std::vector<ValuePlacement> lastGraph) {
+  double localPopCost = 0.0;
+  for (auto op : schedulingOps) {
+    if (!isRouteOp(op) || tmpScheduleResult.count(op) == 0)
+      continue;
+
+    auto pe = tmpScheduleResult[op].pe;
+    auto routeOpr = op->getOperand(0);
+    // if in lastGraph routeOpr is in pe and regAttr is EX or IE, then it is a
+    // local pop
+    auto it =
+        std::find_if(lastGraph.begin(), lastGraph.end(), [&](ValuePlacement p) {
+          return p.val == routeOpr && p.pe == pe &&
+                 (p.regAttr == RegAttr::EX || p.regAttr == RegAttr::IE);
+        });
+    if (it != lastGraph.end())
+      localPopCost += 1.0; // increase the local pop costI
+  }
+  return localPopCost;
+}
+
 double BasicBlockOpAssignment::stepSA(
     int height, SmallVector<Operation *, 4> &schedulingOps,
     std::map<Operation *, ScheduleUnit> &tmpScheduleResult,
@@ -1969,12 +1991,19 @@ double BasicBlockOpAssignment::stepSA(
   double accessCost = getAccessCost(
       curBlock, tmpGraph, tmpScheduleResult, scheduledOps, liveOut, finiGraph,
       attr, schedulingOps.size(), schedulePriority, height);
+
+  auto prevGraph =
+      height == 1 ? startEmbeddingGraph : transformGraphs.at(height - 1);
+  double localPopCost =
+      getLocalPopCost(schedulingOps, tmpScheduleResult, prevGraph);
+
   // get the total cost
-  double currentCost = sucCost + affinityCost + accessCost;
+  double currentCost = sucCost + affinityCost + accessCost + localPopCost;
 
   logMessage("cost: " + std::to_string(sucCost) + " + " +
              std::to_string(affinityCost) + " + " + std::to_string(accessCost) +
-             " = " + std::to_string(currentCost) + "\n");
+             " + " + std::to_string(localPopCost) + " = " +
+             std::to_string(currentCost) + "\n");
   return currentCost;
 }
 
