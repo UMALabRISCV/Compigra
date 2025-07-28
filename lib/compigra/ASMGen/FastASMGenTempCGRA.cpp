@@ -419,6 +419,133 @@ void calculateTemporalSpatialSchedule(
   llvm::errs() << "Temporal spatial schedule is saved to " << fileName << "\n";
 }
 
+static std::map<int, placeunit>
+getRandomInitialPlacement(std::map<int, SetVector<Value>> nodes,
+                          std::map<int, std::set<int>> interGraph,
+                          GridAttribute attr) {
+  std::map<int, placeunit> initialPlacement;
+
+  for (auto &[index, vals] : nodes) {
+    if (initialPlacement.count(index) > 0)
+      continue;
+    // get the placement for vals
+
+    auto pe = std::rand() % (attr.nRow * attr.nCol);
+    initialPlacement[index] = {pe, RegAttr::NK};
+  }
+  return initialPlacement;
+}
+
+double computeInitialPlacementCost(std::map<int, compigra::placeunit> result,
+                                   std::map<int, SetVector<Value>> nodes,
+                                   std::map<Block *, SetVector<Value>> liveIns,
+                                   GridAttribute grid) {
+  double cost = 0.0;
+  // count the register use
+  std::vector<int> regUseCount = std::vector<int>(16, 0);
+  int maxReg = 0;
+  for (auto &[index, place] : result) {
+    auto pe = place.first;
+    regUseCount[pe]++;
+    maxReg = std::max(maxReg, regUseCount[pe]);
+  }
+  // limit the maximum register use to 4
+  if (maxReg > 4)
+    return 1e2;
+
+  // first compute the standard deviation of the register use
+  double mean = 0.0;
+  for (auto useCount : regUseCount) {
+    mean += useCount;
+  }
+  mean /= regUseCount.size();
+  double variance = 0.0;
+  for (auto useCount : regUseCount) {
+    variance += (useCount - mean) * (useCount - mean);
+  }
+  variance /= regUseCount.size();
+  double stdDev = std::sqrt(variance);
+
+  // compute the affinity of the values
+  double affinityCost = 0.0;
+  int costsCount = 0;
+  // get the key of liveVals[i] in nodes
+  auto getRes = [&](Value val) {
+    auto it = std::find_if(nodes.begin(), nodes.end(),
+                           [&](const std::pair<int, SetVector<Value>> &pair) {
+                             return pair.second.count(val) > 0;
+                           });
+    return result[it->first];
+  };
+
+  for (auto [bb, liveVals] : liveIns) {
+    // check whether liveVals have the same consumers
+    for (auto i = 0; i < liveVals.size(); i++) {
+      for (auto j = i + 1; j < liveVals.size(); j++) {
+        auto val1 = liveVals[i];
+        auto val2 = liveVals[j];
+
+        auto pe1 = getRes(val1).first;
+        auto pe2 = getRes(val2).first;
+        auto distance = getDistance(pe1, pe2, grid.nRow, grid.nCol);
+        double maxRouting = grid.nRow / 2 + grid.nCol / 2;
+
+        SetVector<Operation *> val1Users;
+        SetVector<Operation *> val2Users;
+
+        buildChildTree(val1, val1Users, bb);
+        buildChildTree(val2, val2Users, bb);
+
+        bool hasCommonUser = false;
+        int lowerDepth = INT32_MAX;
+
+        for (auto user : val1Users) {
+          if (val2Users.contains(user)) {
+            // get the index of val1 and val2 in val1Users
+            auto depth1 = std::distance(
+                val1Users.begin(),
+                std::find(val1Users.begin(), val1Users.end(), user));
+            auto depth2 = std::distance(
+                val2Users.begin(),
+                std::find(val2Users.begin(), val2Users.end(), user));
+            // estimation of the depth
+            auto depth = (depth1 + depth2) / 3 / 2;
+            affinityCost += std::pow(2, -depth) * distance / maxRouting;
+            hasCommonUser = true;
+            lowerDepth = std::min(lowerDepth, static_cast<int>(depth));
+            costsCount++;
+          }
+        }
+        if (!hasCommonUser || lowerDepth >= 3) {
+          // val1 and val2 are not strong correlated, add penalty for their
+          // affinity
+          affinityCost += 0.5 * (maxRouting - distance) / maxRouting;
+        }
+      }
+    }
+  }
+  affinityCost = affinityCost == 0.0 ? 0.0 : affinityCost / costsCount;
+
+  std::string message;
+  llvm::raw_string_ostream rso(message);
+  rso << "Nodes:\n";
+  for (auto &[index, vals] : nodes) {
+    rso << "index: " << index << "\n";
+    for (auto val : vals) {
+      rso << "  " << val << "\n";
+    }
+    rso << "Placement: " << result[index].first
+        << " reg attr: " << result[index].second << "\n";
+    rso << "\n";
+  }
+  rso << "Cost: " << stdDev << " " << affinityCost << " = "
+      << (stdDev + affinityCost) << "\n";
+  logMessage(rso.str());
+
+  cost = stdDev + affinityCost;
+  return cost;
+}
+
 void optimizeAcrossBBValuePlacement(
     int nRow, int nCol, std::map<Block *, SetVector<Value>> liveIns,
     std::map<Block *, SetVector<Value>> liveOuts,
@@ -435,7 +562,7 @@ void optimizeAcrossBBValuePlacement(
       allLiveValues.insert(val);
   }
 
-  DenseMap<int, SetVector<Value>> nodes;
+  std::map<int, SetVector<Value>> nodes;
   DenseSet<Value> visited;
   for (auto val : allLiveValues) {
     if (visited.count(val) > 0)
@@ -448,18 +575,136 @@ void optimizeAcrossBBValuePlacement(
     }
     nodes[nodes.size()] = relatedVals;
   }
-  // log nodes
+
+  auto processLiveSet = [&](const std::map<Block *, SetVector<Value>> &liveSet,
+                            SetVector<mlir::Value> checkVals,
+                            std::set<int> &interSet) {
+    for (auto [_, liveVals] : liveSet) {
+      bool findNode = false;
+      for (auto val : checkVals) {
+        if (liveVals.count(val) > 0) {
+          findNode = true;
+          break;
+        }
+      }
+      if (!findNode)
+        continue;
+      // insert all node index of liveVals into interSet
+      for (auto [ind, liveVal] : llvm::enumerate(liveVals)) {
+        if (checkVals.count(liveVal) > 0)
+          continue; // skip the node itself
+        interSet.insert(ind);
+      }
+    }
+  };
+
+  std::map<int, std::set<int>> interGraph;
+  for (auto node : nodes) {
+    auto vals = node.second;
+    std::set<int> interSet;
+
+    processLiveSet(liveIns, vals, interSet);
+    processLiveSet(liveOuts, vals, interSet);
+    interGraph[node.first] = interSet;
+  }
+
+  GridAttribute gridAttr = GridAttribute{nRow, nCol, 4};
+  std::map<int, compigra::placeunit> optimal;
+  double minCost = 1e3;
+  for (auto iter = 0; iter < 100; iter++) {
+    auto place = getRandomInitialPlacement(nodes, interGraph, gridAttr);
+    // evaluate the placement
+    double cost = computeInitialPlacementCost(place, nodes, liveIns, gridAttr);
+    if (cost < minCost) {
+      minCost = cost;
+      optimal = place;
+    }
+  }
+
+  // determine the register attributes based on the placement
+  // get all the PE and its corresponding located values
+  std::map<int, std::vector<int>> peValues;
+  for (auto &[index, place] : optimal) {
+    auto pe = place.first;
+    peValues[pe].push_back(index);
+  }
+
+  for (auto &[pe, valIds] : peValues) {
+    int externId = -1;
+    int maxUser = 0;
+    for (auto index : valIds) {
+      auto vals = nodes[index];
+      // get the maxinum number of users
+      for (auto val : vals) {
+        int userCount =
+            std::distance(val.getUsers().begin(), val.getUsers().end());
+        if (userCount > maxUser) {
+          maxUser = userCount;
+          externId = index; // update the externId
+        }
+      }
+    }
+    if (maxUser >= 5) {
+      // assign externId to IE
+      optimal[externId].second = RegAttr::IE;
+    }
+    for (auto index : valIds) {
+      if (maxUser >= 5 && index == externId)
+        continue;
+      optimal[index].second = RegAttr::IN;
+    }
+  }
+
+  // log the optimal placement
   std::string message;
   llvm::raw_string_ostream rso(message);
-  rso << "Nodes:\n";
-  for (auto &[index, vals] : nodes) {
-    rso << "index: " << index << "\n";
-    for (auto val : vals) {
-      rso << val << " ";
-    }
-    rso << "\n";
+  rso << "Optimal placement:\n";
+  for (auto &[index, place] : optimal) {
+    rso << "Node: " << nodes[index][0] << " PE: " << place.first
+        << " RegAttr: " << static_cast<int>(place.second) << "\n";
   }
+  rso << "Min cost: " << minCost << "\n";
   logMessage(rso.str());
+
+  // update the optimal placement to bbInitGraph as prerequisite
+  for (auto [bb, valIns] : liveIns) {
+    // get the placement of valIns
+    std::vector<ValuePlacement> initGraph;
+    for (auto val : valIns) {
+      auto it = std::find_if(nodes.begin(), nodes.end(),
+                             [&](const std::pair<int, SetVector<Value>> &pair) {
+                               return pair.second.count(val) > 0;
+                             });
+      if (it != nodes.end()) {
+        auto pe = optimal[it->first].first;
+        auto regAttr = optimal[it->first].second;
+        initGraph.push_back(
+            ValuePlacement{val, (unsigned)optimal[it->first].first,
+                           optimal[it->first].second}); // pe, regAttr
+      }
+    }
+    bbInitGraphs[bb] = initGraph;
+  }
+
+  // update the optimal placement to bbFiniGraphs as prerequisite
+  for (auto [bb, valOuts] : liveOuts) {
+    // get the placement of valOuts
+    std::vector<ValuePlacement> finiGraph;
+    for (auto val : valOuts) {
+      auto it = std::find_if(nodes.begin(), nodes.end(),
+                             [&](const std::pair<int, SetVector<Value>> &pair) {
+                               return pair.second.count(val) > 0;
+                             });
+      if (it != nodes.end()) {
+        auto pe = optimal[it->first].first;
+        auto regAttr = optimal[it->first].second;
+        finiGraph.push_back(
+            ValuePlacement{val, (unsigned)optimal[it->first].first,
+                           optimal[it->first].second}); // pe, regAttr
+      }
+    }
+    bbFiniGraphs[bb] = finiGraph;
+  }
 }
 
 namespace {
