@@ -51,7 +51,7 @@ static SetVector<T> getSubSet(SetVector<T> vec1, SetVector<T> vec2) {
 }
 
 template <typename T>
-static SetVector<T> getInterSection(SetVector<T> &vec1, SetVector<T> &vec2) {
+SetVector<T> compigra::getInterSection(SetVector<T> &vec1, SetVector<T> &vec2) {
   SetVector<T> result;
   for (auto it = vec1.begin(); it != vec1.end();) {
     if (vec2.count(*it) > 0)
@@ -250,19 +250,19 @@ static bool isLiveExcept(Value val, Block *curBlk, Operation *user,
   return isLive(val, curBlk, liveOut, scheduledOps);
 }
 
-static bool usedByBranch(OpOperand &use) {
+bool compigra::usedByBranch(OpOperand &use) {
   auto user = use.getOwner();
   return isa<cf::BranchOp>(user) ||
          (isa<cgra::ConditionalBranchOp>(user) && use.getOperandNumber() > 1);
 }
 
-static bool usedByBranch(Value val) {
-  for (auto &use : val.getUses()) {
-    if (usedByBranch(use))
-      return true;
-  }
-  return false;
-}
+// bool compigra::usedByBranch(Value val) {
+//   for (auto &use : val.getUses()) {
+//     if (usedByBranch(use))
+//       return true;
+//   }
+//   return false;
+// }
 
 static SmallVector<Operation *, 4>
 getPreviousLayerOps(Block *block, SetVector<Value> &liveout,
@@ -450,7 +450,7 @@ static SmallVector<Operation *, 4> getScheduleOps(
   return schedulingOps;
 }
 
-static int getDistance(int pe1, int pe2, int row, int col) {
+int compigra::getDistance(int pe1, int pe2, int row, int col) {
   int x1 = pe1 / 4;
   int y1 = pe1 % 4;
 
@@ -470,7 +470,8 @@ static int getDistance(int pe1, int pe2, int row, int col) {
 // This function traverses the users of a given value (`val`) and constructs a
 // tree of operations (`childTree`) that are reachable through the user chain
 // within the same block (`blk`).
-void buildChildTree(Value val, SetVector<Operation *> &childTree, Block *blk) {
+void compigra::buildChildTree(Value val, SetVector<Operation *> &childTree,
+                              Block *blk) {
   std::queue<Operation *> userQueue;
   for (auto &use : val.getUses()) {
     auto user = use.getOwner();

@@ -65,6 +65,15 @@ struct PERegUse {
   bool exAvail;
 };
 
+void buildChildTree(Value val, SetVector<Operation *> &childTree, Block *blk);
+
+bool usedByBranch(OpOperand &use);
+
+template <typename T>
+SetVector<T> getInterSection(SetVector<T> &vec1, SetVector<T> &vec2);
+
+int getDistance(int pe1, int pe2, int row, int col);
+
 class BasicBlockOpAssignment {
 public:
   BasicBlockOpAssignment(Block *block, unsigned maxReg, unsigned nRow,
