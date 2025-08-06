@@ -34,24 +34,15 @@ struct Instruction {
 namespace satmapit {
 class PrintSatMapItDAG {
 public:
-  // initialization
-  PrintSatMapItDAG(Operation *terminator, SmallVector<Operation *> nodes,
-                   SmallVector<Operation *> constants,
-                   SmallVector<BlockArgument> &BlockArgs,
-                   SmallVector<Value> &liveOutArgs)
-      : terminator(terminator), nodes(nodes), constants(constants),
-        BlockArgs(BlockArgs), liveOutArgs(liveOutArgs) {}
-
-  PrintSatMapItDAG(Operation *terminator, SmallVector<Operation *> nodes)
-      : terminator(terminator), nodes(nodes) {}
+  PrintSatMapItDAG(Operation *terminator) : terminator(terminator) {}
 
   // print the DAG into multiple text files
   LogicalResult printDAG(std::string fileName);
   LogicalResult printNodes(std::string fileName);
-  LogicalResult printConsts(std::string fileName);
   LogicalResult printEdges(std::string fileName);
-  LogicalResult printLiveIns(std::string fileName);
-  LogicalResult printLiveOuts(std::string fileName);
+
+  // LogicalResult printConsts(std::string fileName);
+  // LogicalResult printLiveIns(std::string fileName);
 
   // init the BlockArgs and liveOuts according to the terminator
   LogicalResult init();
@@ -67,19 +58,20 @@ public:
   // If the operation is constant, add it to constants; if the operation belongs
   // to initBlock, add it to liveIns; if the operation is propated to finiBlock,
   // add the corresponding operation finiBlock to liveOuts.
-  void addNodes(Value val);
-  int getNodeIndex(Operation *op);
-  int getNodeIndex(Value val);
+  // void addNodes(Value val);
+  // int getNodeIndex(Operation *op);
+  // int getNodeIndex(Value val);
 
 private:
   Operation *terminator = nullptr;
-  SmallVector<Operation *> nodes = {};
-  SmallVector<Operation *> constants = {};
-  SmallVector<BlockArgument> BlockArgs = {};
-  SmallVector<Value> liveOutArgs = {};
+  DenseMap<unsigned, Value> nodes;
+  DenseMap<unsigned, Operation *> freeResNodes;
+  // SmallVector<Operation *> nodes = {};
+  // SmallVector<Operation *> constants = {};
+  SmallVector<BlockArgument> blockArgs = {};
 
   Block *loopBlock, *initBlock, *finiBlock;
-  unsigned blockArg = 0;
+  unsigned blockArgNum = 0;
 
   // operation out of SAT-MapIt schedule block
   SmallVector<Value> liveIns = {};
@@ -87,20 +79,23 @@ private:
 
   // Argument with corresponding definition operations
   using selectOps = SmallVector<Value, 2>;
-  std::map<int, selectOps> argMaps;
+  std::map<unsigned, selectOps> argMaps;
 
   llvm::DenseMap<llvm::StringRef, int> CgraInsts = {
-      {"EXIT", 0},     {"add", 1},      {"sub", 2},      {"mul", 3},
-      {"div", 4},      {"UADD", 5},     {"USUB", 6},     {"UMUL", 7},
-      {"UDIV", 8},     {"shl", 9},      {"lshr", 10},    {"and", 11},
-      {"or", 12},      {"xor", 13},     {"and", 14},     {"nor", 15},
-      {"LXNOR", 16},   {"bsfa", 17},    {"bzfa", 43},    {"INA", 18},
-      {"INB", 19},     {"FXP_ADD", 20}, {"FXP_SUB", 21}, {"FXP_MUL", 22},
-      {"FXP_DIV", 23}, {"beq", 24},     {"bne", 25},     {"blt", 26},
-      {"bge", 27},     {"lwd", 28},     {"lwi", 29},     {"LWIPI", 30},
-      {"swd", 31},     {"swi", 32},     {"SWIPI", 33},   {"NOP", 34},
-      {"phi", 40},     {"ble", 41},     {"bge", 42},     {"ashr", 44},
-      {"mv", 45}};
+      {"EXIT", 0},     {"add", 1},      {"sub", 2},
+      {"mul", 3},      {"div", 4},      {"UADD", 5},
+      {"USUB", 6},     {"UMUL", 7},     {"UDIV", 8},
+      {"shl", 9},      {"lshr", 10},    {"and", 11},
+      {"or", 12},      {"xor", 13},     {"and", 14},
+      {"nor", 15},     {"LXNOR", 16},   {"bsfa", 17},
+      {"bzfa", 43},    {"INA", 18},     {"INB", 19},
+      {"FXP_ADD", 20}, {"FXP_SUB", 21}, {"FXP_MUL", 22},
+      {"FXP_DIV", 23}, {"beq", 24},     {"bne", 25},
+      {"blt", 26},     {"bge", 27},     {"LiveInFromArg", 28},
+      {"lwi", 29},     {"LWIPI", 30},   {"LiveOut", 31},
+      {"swi", 32},     {"SWIPI", 33},   {"NOP", 34},
+      {"phi", 40},     {"ble", 41},     {"bge", 42},
+      {"ashr", 44},    {"mv", 45}};
 };
 
 /// Parse the produced map and register allocation result produced by Sat-MapIt.

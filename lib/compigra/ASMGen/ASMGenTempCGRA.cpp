@@ -96,13 +96,13 @@ static LogicalResult preScheduleUsingModuloScheduler(
 
     // for (auto [bbInd, blk] : loopBlocks) {
     // Get the oeprations in the loop block
-    SmallVector<Operation *> nodes;
-    for (Operation &op : blk.getOperations()) {
-      nodes.push_back(&op);
-    }
+    // SmallVector<Operation *> nodes;
+    // for (Operation &op : blk.getOperations()) {
+    //   nodes.push_back(&op);
+    // }
 
     // initialize print function
-    satmapit::PrintSatMapItDAG printer(blk.getTerminator(), nodes);
+    satmapit::PrintSatMapItDAG printer(blk.getTerminator());
     printer.init();
     if (failed(printer.printDAG(outputDAG + "/bb" + std::to_string(bbInd))))
       continue;
@@ -197,7 +197,7 @@ struct ASMGenTemporalCGRAPass
     }
     llvm::errs() << "MS pre-schedule done\n";
     // llvm::errs() << funcOp << "\n";
-    // return;
+    return;
 
     if (failed(scheduler.createSchedulerAndSolve())) {
       llvm::errs() << "Failed to create scheduler and solve\n";

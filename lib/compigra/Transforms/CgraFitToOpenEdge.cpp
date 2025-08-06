@@ -372,7 +372,7 @@ static LogicalResult outputDATE2023DAG(cgra::FuncOp funcOp,
   }
 
   // initialize print function
-  satmapit::PrintSatMapItDAG printer(loopBlk->getTerminator(), nodes);
+  satmapit::PrintSatMapItDAG printer(loopBlk->getTerminator());
   printer.init();
   if (failed(printer.printDAG(outputDAG)))
     return failure();
