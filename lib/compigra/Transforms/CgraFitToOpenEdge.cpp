@@ -21,6 +21,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/raw_ostream.h"
 #include <fstream>
+#include <queue>
 
 // Debugging support
 #include "llvm/Support/Debug.h"
@@ -354,6 +355,138 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
       [&](OpOperand &operand) { return operand.getOwner() != sumOp; });
   return sumOp;
 }
+static Block *getCommonPredecessor(const SmallVector<Block *, 4> &blocks) {
+  if (blocks.empty()) {
+    return nullptr;
+  }
+
+  if (blocks.size() == 1) {
+    return blocks[0];
+  }
+
+  // Use BFS to find reachable blocks from each input block (going backwards)
+  // We'll find the intersection of all blocks that can reach the input blocks
+  std::vector<std::set<Block *>> reachableSets(blocks.size());
+
+  // For each input block, find all blocks that can reach it using reverse BFS
+  for (size_t i = 0; i < blocks.size(); ++i) {
+    std::queue<Block *> worklist;
+    std::set<Block *> visited;
+
+    worklist.push(blocks[i]);
+    visited.insert(blocks[i]);
+
+    while (!worklist.empty()) {
+      Block *current = worklist.front();
+      worklist.pop();
+
+      reachableSets[i].insert(current);
+
+      // Add all predecessors to worklist
+      for (Block *predecessor : current->getPredecessors()) {
+        if (visited.find(predecessor) == visited.end()) {
+          visited.insert(predecessor);
+          worklist.push(predecessor);
+        }
+      }
+    }
+  }
+
+  // Find intersection of all reachable sets
+  std::set<Block *> commonReachable = reachableSets[0];
+  for (size_t i = 1; i < reachableSets.size(); ++i) {
+    std::set<Block *> intersection;
+    std::set_intersection(commonReachable.begin(), commonReachable.end(),
+                          reachableSets[i].begin(), reachableSets[i].end(),
+                          std::inserter(intersection, intersection.begin()));
+    commonReachable = std::move(intersection);
+
+    if (commonReachable.empty()) {
+      return nullptr; // No common predecessor exists
+    }
+  }
+
+  // Now find the "lowest" (closest) common predecessor
+  // We'll use reverse BFS from all input blocks simultaneously to find the
+  // first common block
+  std::queue<std::pair<Block *, int>> worklist; // (block, distance)
+  std::map<Block *, int> distances;
+
+  // Initialize with all input blocks
+  for (Block *block : blocks) {
+    worklist.push({block, 0});
+    distances[block] = 0;
+  }
+
+  while (!worklist.empty()) {
+    auto [current, dist] = worklist.front();
+    worklist.pop();
+
+    // Skip if we've seen this block at a shorter distance
+    if (distances.count(current) && distances[current] < dist) {
+      continue;
+    }
+
+    // Check if this block can reach all input blocks
+    if (commonReachable.count(current) && current != blocks[0]) {
+      // Verify this can actually reach all input blocks
+      bool canReachAll = true;
+      for (size_t i = 0; i < blocks.size(); ++i) {
+        if (reachableSets[i].find(current) == reachableSets[i].end()) {
+          canReachAll = false;
+          break;
+        }
+      }
+
+      if (canReachAll) {
+        return current;
+      }
+    }
+
+    // Add predecessors to worklist
+    for (Block *predecessor : current->getPredecessors()) {
+      int newDist = dist + 1;
+      if (!distances.count(predecessor) || distances[predecessor] > newDist) {
+        distances[predecessor] = newDist;
+        worklist.push({predecessor, newDist});
+      }
+    }
+  }
+
+  return nullptr; // No common predecessor found
+}
+
+/// Raise constant generation operations out of the loop body.
+static void raiseCstOpGenOutLoop(func::FuncOp funcOp) {
+  for (auto &blk : funcOp.getBlocks()) {
+    // check whether blk's successorts contain itself
+    bool isLoopBody =
+        std::find(blk.getPredecessors().begin(), blk.getPredecessors().end(),
+                  &blk) != blk.getPredecessors().end();
+    if (!isLoopBody)
+      continue;
+
+    SmallVector<Block *, 4> predecessors;
+    for (auto succ : blk.getPredecessors()) {
+      // check whether the successor block is the same as the head block
+      if (succ == &blk)
+        continue;
+      predecessors.push_back(succ);
+    }
+
+    for (auto &op : llvm::make_early_inc_range(blk.getOperations())) {
+      // check whether the op has attribute "constant"
+      if (!op.getAttr("constant"))
+        continue;
+
+      llvm::errs() << "Rearrange " << op << "\n";
+      // get the comman predeccessor block
+      Block *commonSucc = getCommonPredecessor(predecessors);
+      // move op to the common predeccessor block
+      op.moveBefore(commonSucc->getTerminator());
+    }
+  }
+}
 
 static LogicalResult outputDATE2023DAG(cgra::FuncOp funcOp,
                                        std::string outputDAG) {
@@ -581,6 +714,8 @@ void CgraFitToOpenEdgePass::runOnOperation() {
     }
   }
 
+  raiseCstOpGenOutLoop(funcOp);
+  llvm::errs() << funcOp << "\n";
   // print the DAG of the specified function
   if (!outputDAG.empty()) {
     size_t lastSlashPos = outputDAG.find_last_of("/");
