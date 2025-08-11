@@ -16,6 +16,7 @@
 
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
+#include "compigra/Scheduler/BasicBlockILPModel.h"
 #include "compigra/Scheduler/BasicBlockOpAssignment.h"
 #include "compigra/Scheduler/KernelSchedule.h"
 #include "compigra/Transforms/SatMapItDATE2023InputGen/PrintSatMapItDAG.h"
@@ -122,7 +123,7 @@ public:
   // the global register allocation.
   LogicalResult
   assignScheduleResult(const std::map<int, Instruction> instructions,
-                       int maxReg, int maxPE);
+                       liveVec existingLiveValues, int maxReg, int maxPE);
 
   std::map<Operation *, compigra::ScheduleUnit> getSolutions() {
     return solution;

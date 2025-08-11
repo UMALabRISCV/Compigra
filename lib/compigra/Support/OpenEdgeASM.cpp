@@ -1039,14 +1039,5 @@ compigra::getLoopOpUnfoldExeTime(const std::map<int, std::set<int>> opTimeMap) {
 bool compigra::kernelOverlap(std::vector<std::set<int>> bbTimeMap) {
   if (bbTimeMap.empty())
     return false;
-  // print bbTimeMap
-  for (size_t i = 0; i < bbTimeMap.size(); i++) {
-    auto &set1 = bbTimeMap[i];
-    llvm::errs() << "BB " << i << ": ";
-    for (auto j : set1) {
-      llvm::errs() << j << " ";
-    }
-    llvm::errs() << "\n";
-  }
   return !bbTimeMap.back().empty();
 }

@@ -927,11 +927,11 @@ void copyAnotherBlockArgument(BlockArgument arg, BlockArgument newArg,
 }
 
 static void assignPrerequisite(Value val, Operation *consumerOp,
-                               std::vector<std::pair<Value, int>> &existArgs,
+                               liveVec &localArgs, liveVec globalPlacement,
                                OpBuilder &builder, ScheduleUnit schedule) {
   // if val is a block argument
   if (auto bbArg = dyn_cast_or_null<BlockArgument>(val)) {
-    for (auto [arg, prereqPE] : existArgs) {
+    for (auto [arg, prereqPE] : localArgs) {
       if (prereqPE == schedule.pe) {
         val.replaceUsesWithIf(arg, [&](OpOperand &operand) {
           return operand.getOwner() == consumerOp;
@@ -943,9 +943,8 @@ static void assignPrerequisite(Value val, Operation *consumerOp,
     // if cannot find reused value, add another block argument
     auto newArg =
         val.getParentBlock()->addArgument(val.getType(), val.getLoc());
-    existArgs.push_back({newArg, schedule.pe});
+    localArgs.push_back({newArg, schedule.pe});
     // copy the corresponding propagated value
-    // TODO[@YYY26/Feb], code refactor
     SetVector<Block *> visited;
     copyAnotherBlockArgument(bbArg, newArg, visited, builder);
     val.replaceUsesWithIf(newArg, [&](OpOperand &operand) {
@@ -955,7 +954,7 @@ static void assignPrerequisite(Value val, Operation *consumerOp,
   }
 
   auto defOp = val.getDefiningOp();
-  for (auto [arg, prereqPE] : existArgs) {
+  for (auto [arg, prereqPE] : localArgs) {
     if (prereqPE == schedule.pe) {
       defOp->replaceUsesWithIf(arg.getDefiningOp(), [&](OpOperand &operand) {
         return operand.getOwner() == consumerOp;
@@ -970,7 +969,7 @@ static void assignPrerequisite(Value val, Operation *consumerOp,
   defOp->replaceUsesWithIf(newOp, [&](OpOperand &operand) {
     return operand.getOwner() == consumerOp;
   });
-  existArgs.push_back({newOp->getResult(0), schedule.pe});
+  localArgs.push_back({newOp->getResult(0), schedule.pe});
 }
 
 static int seekAvailableSlot(
@@ -996,7 +995,8 @@ static int seekAvailableSlot(
 }
 
 LogicalResult ModuloScheduleAdapter::assignScheduleResult(
-    const std::map<int, Instruction> instructions, int maxReg, int maxPE) {
+    const std::map<int, Instruction> instructions, liveVec globalValPlacement,
+    int maxReg, int maxPE) {
   // for operation in prologOps, its execution time is exectTime[opId] +
   // iterId * II
   int termPE = -1;
@@ -1007,7 +1007,7 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
   // the first vector records the original live in arguments, and the second
   // vector records the value split from the original live in arguments and
   // their placement.
-  std::vector<std::vector<std::pair<Value, int>>> liveInArgs;
+  std::vector<liveVec> liveInArgs;
   for (auto [iterId, opMap] : prologOps) {
     if (iterId == -1)
       continue;
@@ -1045,9 +1045,24 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
               std::find(origLiveInArgs.begin(), origLiveInArgs.end(), opr));
         }
 
+        // if find opr in globalValPlacement and its pe is different from the
+        // current operation's pe, assign the prerequisite
+        auto globalPlacePtr =
+            std::find_if(globalValPlacement.begin(), globalValPlacement.end(),
+                         [&](const std::pair<mlir::Value, unsigned int> &pair) {
+                           return pair.first == opr;
+                         });
+        if (globalPlacePtr != globalValPlacement.end() &&
+            instructions.at(opId).pe != globalPlacePtr->second) {
+          assignPrerequisite(opr, op, liveInArgs[liveInArgId],
+                             globalValPlacement, builder, schedule);
+          continue;
+        }
+
         if (liveInArgs[liveInArgId].size() == 0)
           liveInArgs[liveInArgId].push_back({opr, instructions.at(opId).pe});
-        assignPrerequisite(opr, op, liveInArgs[liveInArgId], builder, schedule);
+        assignPrerequisite(opr, op, liveInArgs[liveInArgId], globalValPlacement,
+                           builder, schedule);
       }
     }
   }
@@ -1105,11 +1120,24 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
                 origLiveInArgs.begin(),
                 std::find(origLiveInArgs.begin(), origLiveInArgs.end(), opr));
           }
+
+          auto globalPlacePtr = std::find_if(
+              globalValPlacement.begin(), globalValPlacement.end(),
+              [&](const std::pair<mlir::Value, unsigned int> &pair) {
+                return pair.first == opr;
+              });
+          if (globalPlacePtr != globalValPlacement.end() &&
+              instructions.at(opId).pe != globalPlacePtr->second) {
+            assignPrerequisite(opr, op, liveInArgs[liveInArgId],
+                               globalValPlacement, builder, schedule);
+            continue;
+          }
+
           if (liveInArgs[liveInArgId].size() == 0)
             liveInArgs[liveInArgId].push_back({opr, instructions.at(opId).pe});
 
-          assignPrerequisite(opr, op, liveInArgs[liveInArgId], builder,
-                             schedule);
+          assignPrerequisite(opr, op, liveInArgs[liveInArgId],
+                             globalValPlacement, builder, schedule);
         }
       }
     }

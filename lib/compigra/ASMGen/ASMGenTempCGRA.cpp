@@ -108,7 +108,7 @@ static LogicalResult preScheduleUsingModuloScheduler(
                           "/out_raw_bb" + std::to_string(bbInd) + ".sat\n";
 
     // call the python code script to solve the MS
-    llvm::errs() << "---> Running the SAT-Solver: \n" << command << "\n";
+    llvm::errs() << "---> Running the SAT-Solver: \n" << command;
 
     int result = system(command.c_str());
     if (result != 0)
@@ -133,7 +133,7 @@ static LogicalResult preScheduleUsingModuloScheduler(
         !kernelOverlap(basicBlocksWithOpIds))
       continue;
 
-    llvm::errs() << "II: " << II << "\n";
+    llvm::errs() << "II: " << II << "\n\n";
     if (failed(initBlockArgs(&blk, instructions, builder)))
       return failure();
 
@@ -146,8 +146,9 @@ static LogicalResult preScheduleUsingModuloScheduler(
       return failure();
 
     // assign basic block with the schedule result
-    if (failed(adapter.assignScheduleResult(instructions, maxReg,
-                                            peGridSize * peGridSize)))
+    auto schedulerRequirements = scheduler.getExistingPlacedValues();
+    if (failed(adapter.assignScheduleResult(instructions, schedulerRequirements,
+                                            maxReg, peGridSize * peGridSize)))
       return failure();
     auto prereq = adapter.getPrerequisites();
     scheduler.setupPrerequisite(prereq);

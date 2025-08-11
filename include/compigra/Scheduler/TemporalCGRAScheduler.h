@@ -81,6 +81,8 @@ public:
 
   void setupPrerequisite(std::vector<std::pair<Value, int>> valPlacement);
 
+  liveVec getExistingPlacedValues() const { return liveValAndPEs; }
+
 private:
   // ======================== Liveness Data Structures =======================
   // Corresponding livein and liveout values of each block
