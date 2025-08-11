@@ -108,14 +108,11 @@ LogicalResult PrintSatMapItDAG::init() {
     if (op.getNumResults() == 0) {
       freeResNodes[blockArgNum + ind] = &op;
       nodes[blockArgNum + ind] = nullptr;
-      llvm::errs() << blockArgNum + ind << " " << op << "\n";
       continue;
     }
-    llvm::errs() << blockArgNum + ind << " " << op << "\n";
     nodes[blockArgNum + ind] = op.getResult(0);
   }
 
-  llvm::errs() << "Init success\n";
   return success();
 }
 
@@ -148,6 +145,19 @@ static std::string getOperantionName(Operation *node) {
   return nodeName;
 }
 
+static int getIntegerConstantValue(arith::ConstantOp cstOp) {
+  int constVal;
+  if (auto intAttr = cstOp.getValue().dyn_cast<IntegerAttr>()) {
+    constVal = intAttr.getInt();
+  } else if (auto floatAttr = cstOp.getValue().dyn_cast<FloatAttr>()) {
+    constVal = static_cast<int>(floatAttr.getValue().convertToFloat());
+  } else {
+    LLVM_DEBUG(llvm::dbgs() << "Unsupported constant type\n");
+    return INFINITY;
+  }
+  return constVal;
+}
+
 LogicalResult PrintSatMapItDAG::printDAG(std::string fileName) {
   std::string nodeFile = fileName + "_nodes";
   std::string edgeFile = fileName + "_edges";
@@ -169,6 +179,15 @@ LogicalResult PrintSatMapItDAG::printDAG(std::string fileName) {
   auto opIndex = nodes.size();
 
   auto getNodeIndex = [&](Value val, bool append = true) -> int {
+    // always generate new constant node
+    if (val.getDefiningOp() && isa<arith::ConstantOp>(val.getDefiningOp())) {
+      if (!append)
+        return -1;
+      auto nodeIndex = nodes.size();
+      nodes[nodeIndex] = val;
+      return nodeIndex++;
+    }
+
     for (size_t ind = 0; ind < nodes.size(); ++ind) {
       if (nodes[ind] == val) {
         return ind;
@@ -187,7 +206,6 @@ LogicalResult PrintSatMapItDAG::printDAG(std::string fileName) {
     auto val = nodes[ind];
     std::string nodeName;
     SmallVector<Value, 3> operands;
-    llvm::errs() << "Processing node: " << ind << "\n";
 
     Operation *defOp =
         (val == nullptr) ? freeResNodes[ind] : val.getDefiningOp();
@@ -211,9 +229,6 @@ LogicalResult PrintSatMapItDAG::printDAG(std::string fileName) {
         operands.push_back(defOp->getOperand(0));
     }
 
-    if (val != nullptr)
-      llvm::errs() << "Node value: " << val << "\n";
-
     auto leftOpInd = operands.size() > 0 ? getNodeIndex(operands[0]) : -1;
     auto rightOpInd = operands.size() > 1 ? getNodeIndex(operands[1]) : -1;
     auto predicateSel = operands.size() > 2 ? getNodeIndex(operands[2]) : -1;
@@ -222,6 +237,20 @@ LogicalResult PrintSatMapItDAG::printDAG(std::string fileName) {
                 << std::to_string(CgraInsts[nodeName]) << " " << leftOpInd
                 << " " << rightOpInd << " " << std::to_string(predicateSel)
                 << " 0 0\n";
+
+    if (operands.size() > 0 && operands[0].getDefiningOp())
+      if (auto cstOp = dyn_cast_or_null<arith::ConstantOp>(
+              operands[0].getDefiningOp())) {
+        nodeFStream << std::to_string(leftOpInd) << " constant nil -1 -1 -1 -1 "
+                    << getIntegerConstantValue(cstOp) << " " << 1 << "\n";
+      }
+    if (operands.size() > 1 && operands[1].getDefiningOp())
+      if (auto cstOp = dyn_cast_or_null<arith::ConstantOp>(
+              operands[1].getDefiningOp())) {
+        nodeFStream << std::to_string(rightOpInd)
+                    << " constant nil -1 -1 -1 -1 "
+                    << getIntegerConstantValue(cstOp) << " " << 0 << "\n";
+      }
 
     auto outToEdgeFile = [&](int srcInd, int destInd) {
       if (srcInd < 0 || destInd < 0)
@@ -249,25 +278,25 @@ LogicalResult PrintSatMapItDAG::printDAG(std::string fileName) {
       continue;
     }
 
-    for (auto user : defOp->getUsers()) {
-      if (user->getBlock() != loopBlock)
-        continue;
-      unsigned posLR = user->getOperand(0).getDefiningOp() == defOp ? 0 : 1;
+    // for (auto user : defOp->getUsers()) {
+    //   if (user->getBlock() != loopBlock)
+    //     continue;
+    //   unsigned posLR = user->getOperand(0).getDefiningOp() == defOp ? 1 : 0;
 
-      // get the integer or floating point constant value of constOp
-      int constVal;
-      if (auto intAttr = defOp->getAttr("value").dyn_cast<IntegerAttr>()) {
-        constVal = intAttr.getInt();
-      } else if (auto floatAttr =
-                     defOp->getAttr("value").dyn_cast<FloatAttr>()) {
-        constVal = static_cast<int>(floatAttr.getValue().convertToFloat());
-      } else {
-        LLVM_DEBUG(llvm::dbgs() << "Unsupported constant type\n");
-        return failure();
-      }
-      nodeFStream << std::to_string(opId) << " constant nil -1 -1 -1 -1 "
-                  << constVal << " " << posLR << "\n";
-    }
+    //   // get the integer or floating point constant value of constOp
+    //   int constVal;
+    //   if (auto intAttr = defOp->getAttr("value").dyn_cast<IntegerAttr>()) {
+    //     constVal = intAttr.getInt();
+    //   } else if (auto floatAttr =
+    //                  defOp->getAttr("value").dyn_cast<FloatAttr>()) {
+    //     constVal = static_cast<int>(floatAttr.getValue().convertToFloat());
+    //   } else {
+    //     LLVM_DEBUG(llvm::dbgs() << "Unsupported constant type\n");
+    //     return failure();
+    //   }
+    //   nodeFStream << std::to_string(opId) << " constant nil -1 -1 -1 -1 "
+    //               << constVal << " " << posLR << "\n";
+    // }
   }
 
   nodeFStream.close();
@@ -294,9 +323,9 @@ void satmapit::parsePKE(const std::string &line, unsigned termId,
   while (std::getline(lineStream, token, ' ')) {
     if (!token.empty()) {
       values.insert(std::stoi(token));
-      if (std::stoi(token) == termId)
-        // push back a new set for the new basic block
-        timeSlotsOfBBs.push_back({});
+      // if (std::stoi(token) == termId)
+      //   // push back a new set for the new basic block
+      //   timeSlotsOfBBs.push_back({});
     }
   }
   opTimeMap[tVal] = values;

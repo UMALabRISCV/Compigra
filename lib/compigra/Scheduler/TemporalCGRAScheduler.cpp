@@ -157,6 +157,20 @@ void TemporalCGRAScheduler::printBlockLiveValue(std::string fileName) {
     return;
   }
 
+  auto printAttr = [&](Value val) {
+    std::string attr = isExternalLive(val) ? "EX" : "IN";
+    // if find val in liveValAndPEs, print the index
+    auto it = std::find_if(
+        liveValAndPEs.begin(), liveValAndPEs.end(),
+        [&](std::pair<Value, unsigned> p) { return p.first == val; });
+    unsigned attrIndex = (it != liveValAndPEs.end()) ? it->second : UINT32_MAX;
+    if (attrIndex != UINT32_MAX)
+      attr += " " + std::to_string(attrIndex);
+    else
+      attr += " -1"; // -1 means not assigned to any PE
+    return attr;
+  };
+
   unsigned blockNum = 0;
   // print liveIn and liveOut
   for (auto &block : region) {
@@ -173,7 +187,7 @@ void TemporalCGRAScheduler::printBlockLiveValue(std::string fileName) {
       std::string str;
       llvm::raw_string_ostream rso(str);
       rso << val;
-      std::string attr = isExternalLive(val) ? "External" : "Internal";
+      auto attr = printAttr(val);
       outFile << rso.str() << " " << attr << "\n";
     }
     outFile << "LiveOut: ";
@@ -188,7 +202,7 @@ void TemporalCGRAScheduler::printBlockLiveValue(std::string fileName) {
       std::string str;
       llvm::raw_string_ostream rso(str);
       rso << val;
-      std::string attr = isExternalLive(val) ? "External" : "Internal";
+      auto attr = printAttr(val);
       outFile << rso.str() << " " << attr << "\n";
     }
     outFile << "\n";
@@ -1002,52 +1016,6 @@ void TemporalCGRAScheduler::makeScheduleSeq() {
         scheduleSeq.end())
       scheduleSeq.push_back(&bb);
   }
-
-  // // init the schedule sequence
-  // scheduleSeq.clear();
-  // scheduleIdx = 0;
-
-  // std::map<Block *, int> blockOrder;
-  // std::vector<Block *> workList;
-  // for (auto &block : region.getBlocks())
-  //   workList.push_back(&block);
-
-  // // calculate the block order
-  // std::vector<std::vector<Block *>> visitedCycle;
-  // for (auto &block : region.getBlocks()) {
-  //   if (!blockOrder.count(&block))
-  //     blockOrder[&block] = 0;
-  //   // dfs the block, if it returns to itself, it is a cycle
-  //   std::vector<Block *> cycle;
-  //   std::unordered_set<Block *> visited;
-  //   if (dfsBlock(&block, &block, cycle, visited) &&
-  //       !existInCycle(cycle, visitedCycle)) {
-  //     visitedCycle.push_back(cycle);
-  //     for (auto &b : cycle)
-  //       blockOrder[b] += 1;
-  //   }
-  // }
-
-  // for (auto &block : region.getBlocks()) {
-  //   // calculate the number of constant ops
-  //   unsigned cstOpNum =
-  //   std::distance(block.getOps<arith::ConstantOp>().begin(),
-  //                                     block.getOps<arith::ConstantOp>().end());
-  //   cstOpNum += std::distance(block.getOps<arith::ConstantFloatOp>().begin(),
-  //                             block.getOps<arith::ConstantFloatOp>().end());
-  //   cstOpNum += std::distance(block.getOps<arith::ConstantIntOp>().begin(),
-  //                             block.getOps<arith::ConstantIntOp>().end());
-  //   auto weight = block.getOperations().size() - cstOpNum;
-  //   blockOrder[&block] += weight * 0.1;
-  // }
-
-  // // sort the block according to the order
-  // std::sort(workList.begin(), workList.end(), [&](Block *a, Block *b) {
-  //   if (blockOrder[a] == blockOrder[b])
-  //     return a->getOperations().size() > b->getOperations().size();
-  //   return blockOrder[a] > blockOrder[b];
-  // });
-  // scheduleSeq = workList;
 }
 
 void TemporalCGRAScheduler::rollBackMovOp(Value failVal, int maxIter) {
@@ -1178,7 +1146,8 @@ LogicalResult TemporalCGRAScheduler::createSchedulerAndSolve() {
 
     saveSubILPModelResult(bbILPModel.getSolution());
     scheduleIdx++;
-    llvm::errs() << scheduleIdx << " block is scheduled\n\n";
+    llvm::errs() << scheduleIdx << " block is scheduled:\n   "
+                 << *block->getTerminator() << "\n\n";
   }
   calculateTemporalSpatialSchedule("temporalSpatialSchedule.csv");
   // printBlockLiveValue("liveValue.txt");

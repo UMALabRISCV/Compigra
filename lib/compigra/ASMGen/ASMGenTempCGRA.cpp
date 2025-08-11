@@ -94,13 +94,6 @@ static LogicalResult preScheduleUsingModuloScheduler(
     if (!isLoop)
       continue;
 
-    // for (auto [bbInd, blk] : loopBlocks) {
-    // Get the oeprations in the loop block
-    // SmallVector<Operation *> nodes;
-    // for (Operation &op : blk.getOperations()) {
-    //   nodes.push_back(&op);
-    // }
-
     // initialize print function
     satmapit::PrintSatMapItDAG printer(blk.getTerminator());
     printer.init();
@@ -108,13 +101,14 @@ static LogicalResult preScheduleUsingModuloScheduler(
       continue;
 
     // detect whether the python executable exist
-    std::string command = pythonExectuable + " --path " + outputDAG +
-                          "/ --bench bb" + std::to_string(bbInd) + " --unit " +
+    std::string command = pythonExectuable + " -path " + outputDAG +
+                          "/ -bench bb" + std::to_string(bbInd) + " -x " +
+                          std::to_string(peGridSize) + " -y " +
                           std::to_string(peGridSize) + " > " + outputDAG +
                           "/out_raw_bb" + std::to_string(bbInd) + ".sat\n";
 
     // call the python code script to solve the MS
-    llvm::errs() << "Running the SAT-Solver for bb: " << bbInd << "\n";
+    llvm::errs() << "---> Running the SAT-Solver: \n" << command << "\n";
 
     int result = system(command.c_str());
     if (result != 0)
@@ -128,7 +122,7 @@ static LogicalResult preScheduleUsingModuloScheduler(
     int II;
     std::map<int, Instruction> instructions;
     std::map<int, std::set<int>> opTimeMap;
-    std::vector<std::set<int>> basicBlocksWithOpIds = {{}};
+    std::vector<std::set<int>> basicBlocksWithOpIds = {};
     if (failed(readMapFile(mapResult, maxReg,
                            opSize + blk.getNumArguments() - 1, II, opTimeMap,
                            basicBlocksWithOpIds, instructions)))
@@ -139,6 +133,7 @@ static LogicalResult preScheduleUsingModuloScheduler(
         !kernelOverlap(basicBlocksWithOpIds))
       continue;
 
+    llvm::errs() << "II: " << II << "\n";
     if (failed(initBlockArgs(&blk, instructions, builder)))
       return failure();
 
@@ -197,7 +192,7 @@ struct ASMGenTemporalCGRAPass
     }
     llvm::errs() << "MS pre-schedule done\n";
     // llvm::errs() << funcOp << "\n";
-    return;
+    // return;
 
     if (failed(scheduler.createSchedulerAndSolve())) {
       llvm::errs() << "Failed to create scheduler and solve\n";

@@ -75,6 +75,10 @@ public:
   //   enableLoads[restrictBB] = enableLoad;
   // }
 
+  // ====================== Liveness Analysis Functions ======================
+  /// Get the livein and liveout values for each block.
+  void computeLiveValue();
+
   void setupPrerequisite(std::vector<std::pair<Value, int>> valPlacement);
 
 private:
@@ -97,12 +101,9 @@ private:
   // Start address of the memory for the evicted value
   unsigned reserveMem = 0;
 
-  // ====================== Liveness Analysis Functions ======================
-  /// Get the livein and liveout values for each block.
-  void computeLiveValue();
-
   void makeScheduleSeq();
 
+  // ====================== Liveness Analysis Functions ======================
   /// Rules to determine whether the value is internal or external live value.
   unsigned maxLivePath = 5;
 

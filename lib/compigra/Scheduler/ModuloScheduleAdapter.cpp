@@ -607,6 +607,18 @@ LogicalResult ModuloScheduleAdapter::completeUnexecutedOperationsInBB(
   builder.setInsertionPointToEnd(blk);
   SmallVector<Value> jumpArgs;
   for (auto arg : finiBlock->getArguments()) {
+    auto propValue = getPropagatedValue(templateBlock->getTerminator(),
+                                        finiBlock, arg.getArgNumber());
+    // if the value is not produced in the template block, directly add it to
+    // the jump arguments
+    // if propValue is not produced in newBlocks
+    auto srcProdBlock = propValue.getParentBlock();
+    if (std::find(newBlocks.begin(), newBlocks.end(), srcProdBlock) ==
+        newBlocks.end()) {
+      jumpArgs.push_back(propValue);
+      continue;
+    }
+
     // get the opid from the template terminator
     auto opId =
         getOpId(loopOpList, getPropagatedValue(templateBlock->getTerminator(),
@@ -718,7 +730,11 @@ LogicalResult ModuloScheduleAdapter::adaptCFGWithLoopMS() {
     if (bbId == 0)
       continue;
 
-    auto termIterId = getLatestIterId(prologOps, loopOpNum - 1, false);
+    auto opIdSets = getUnionSet(opTimeMap, timeSlotsOfBBs[bbId - 1]);
+
+    int termIterId = -1;
+    if (opIdSets.count(loopOpNum - 1))
+      termIterId = getLatestIterId(prologOps, loopOpNum - 1, false);
 
     // get condition to loopCond and loopQuit
     auto origTerm = templateBlock->getTerminator();
@@ -737,8 +753,10 @@ LogicalResult ModuloScheduleAdapter::adaptCFGWithLoopMS() {
       }
     };
 
-    updateTermCmpOperand(loopCmpOprId1, cmpOpr1);
-    updateTermCmpOperand(loopCmpOprId2, cmpOpr2);
+    if (opIdSets.count(loopOpNum - 1)) {
+      updateTermCmpOperand(loopCmpOprId1, cmpOpr1);
+      updateTermCmpOperand(loopCmpOprId2, cmpOpr2);
+    }
 
     if (bbId <= loopBlkId) {
       // create the epilog block for bbId-1's block for loop exit
@@ -777,15 +795,25 @@ LogicalResult ModuloScheduleAdapter::adaptCFGWithLoopMS() {
         finiArgs.push_back(prologOps[iterId][opId]->getResult(0));
       }
     }
-    auto termOp = builder.create<cgra::ConditionalBranchOp>(
-        curBlk->getOperations().back().getLoc(), cmpFlag, cmpOpr1, cmpOpr2,
-        loopCond, contArgs, loopQuit, finiArgs);
 
-    if (bbId != loopBlkId + 1 &&
-        termOp.getFalseDest() != termOp->getBlock()->getNextNode())
-      reverseCondBrFlag(termOp);
+    Operation *newTerminator;
+    // create terminator operation for last block
+    if (opIdSets.count(loopOpNum - 1)) {
+      auto termOp = builder.create<cgra::ConditionalBranchOp>(
+          curBlk->getOperations().back().getLoc(), cmpFlag, cmpOpr1, cmpOpr2,
+          loopCond, contArgs, loopQuit, finiArgs);
+      newTerminator = termOp;
 
-    prologOps[termIterId][loopOpNum - 1] = termOp;
+      if (bbId != loopBlkId + 1 &&
+          termOp.getFalseDest() != termOp->getBlock()->getNextNode())
+        reverseCondBrFlag(termOp);
+    } else {
+      auto termOp = builder.create<cf::BranchOp>(
+          curBlk->getOperations().back().getLoc(), loopCond);
+      newTerminator = termOp;
+    }
+
+    prologOps[termIterId][loopOpNum - 1] = newTerminator;
     curBlk = loopCond;
 
     if (bbId == loopBlkId + 1)
@@ -988,12 +1016,13 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
       int reg = instructions.at(opId).Rout == maxReg ? maxReg : -1;
       ScheduleUnit schedule = {execTimeInBB, instructions.at(opId).pe, reg};
       solution[op] = schedule;
+
+      if (op->getNumResults() > 0)
+        prerequisites.push_back({op->getResult(0), instructions.at(opId).pe});
       if (opId == loopOpNum - 1)
         termPE = instructions.at(opId).pe;
       // assign the corresponding consumer with the schedule
       for (auto opr : op->getOperands()) {
-        // if the operand has been resolved by the schedule solution, no need
-        // to write them to the prerequisites
         if (std::find(newBlocks.begin(), newBlocks.end(),
                       opr.getParentBlock()) != newBlocks.end())
           continue;
@@ -1002,6 +1031,7 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
           if (isa<arith::ConstantOp>(defOp))
             continue;
 
+        // Only consider the value produced outside the original blocks
         unsigned liveInArgId = origLiveInArgs.size();
 
         // whether the livein value has already been initialized
@@ -1014,6 +1044,7 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
               origLiveInArgs.begin(),
               std::find(origLiveInArgs.begin(), origLiveInArgs.end(), opr));
         }
+
         if (liveInArgs[liveInArgId].size() == 0)
           liveInArgs[liveInArgId].push_back({opr, instructions.at(opId).pe});
         assignPrerequisite(opr, op, liveInArgs[liveInArgId], builder, schedule);
@@ -1042,6 +1073,8 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
         ScheduleUnit schedule = {execTimeInBB, instructions.at(opId).pe, -1};
         solution[op] = schedule;
         endBBTime = std::max(endBBTime, execTimeInBB);
+        if (op->getNumResults() > 0)
+          prerequisites.push_back({op->getResult(0), instructions.at(opId).pe});
 
         // assign the live-in value
         for (auto opr : op->getOperands()) {

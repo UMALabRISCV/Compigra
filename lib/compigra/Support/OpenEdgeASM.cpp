@@ -946,6 +946,7 @@ LogicalResult compigra::readMapFile(std::string mapResult, unsigned maxReg,
   bool parsing = false;
   bool cfgParse = false;
   bool parsed = false;
+  int t = 0;
 
   // Read each line and parse it into the map
   while (std::getline(file, line)) {
@@ -965,6 +966,10 @@ LogicalResult compigra::readMapFile(std::string mapResult, unsigned maxReg,
     }
 
     if (cfgParse) {
+      if (t % II == 0) {
+        timeSlotsOfBBs.push_back(std::set<int>());
+      }
+      t++;
       satmapit::parsePKE(line, numOps, timeSlotsOfBBs, opTimeMap);
       parsed = true;
     }
@@ -1034,5 +1039,14 @@ compigra::getLoopOpUnfoldExeTime(const std::map<int, std::set<int>> opTimeMap) {
 bool compigra::kernelOverlap(std::vector<std::set<int>> bbTimeMap) {
   if (bbTimeMap.empty())
     return false;
+  // print bbTimeMap
+  for (size_t i = 0; i < bbTimeMap.size(); i++) {
+    auto &set1 = bbTimeMap[i];
+    llvm::errs() << "BB " << i << ": ";
+    for (auto j : set1) {
+      llvm::errs() << j << " ";
+    }
+    llvm::errs() << "\n";
+  }
   return !bbTimeMap.back().empty();
 }

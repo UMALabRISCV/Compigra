@@ -479,7 +479,6 @@ static void raiseCstOpGenOutLoop(func::FuncOp funcOp) {
       if (!op.getAttr("constant"))
         continue;
 
-      llvm::errs() << "Rearrange " << op << "\n";
       // get the comman predeccessor block
       Block *commonSucc = getCommonPredecessor(predecessors);
       // move op to the common predeccessor block
@@ -715,7 +714,6 @@ void CgraFitToOpenEdgePass::runOnOperation() {
   }
 
   raiseCstOpGenOutLoop(funcOp);
-  llvm::errs() << funcOp << "\n";
   // print the DAG of the specified function
   if (!outputDAG.empty()) {
     size_t lastSlashPos = outputDAG.find_last_of("/");
