@@ -613,8 +613,9 @@ LogicalResult ModuloScheduleAdapter::completeUnexecutedOperationsInBB(
     // the jump arguments
     // if propValue is not produced in newBlocks
     auto srcProdBlock = propValue.getParentBlock();
-    if (std::find(newBlocks.begin(), newBlocks.end(), srcProdBlock) ==
-        newBlocks.end()) {
+    if (srcProdBlock != templateBlock &&
+        std::find(newBlocks.begin(), newBlocks.end(), srcProdBlock) ==
+            newBlocks.end()) {
       jumpArgs.push_back(propValue);
       continue;
     }
@@ -761,10 +762,12 @@ LogicalResult ModuloScheduleAdapter::adaptCFGWithLoopMS() {
     if (bbId <= loopBlkId) {
       // create the epilog block for bbId-1's block for loop exit
       auto epiBlk = builder.createBlock(loopQuit);
-      builder.setInsertionPointToStart(epiBlk);
-      if (failed(completeUnexecutedOperationsInBB(epiBlk, bbId, termIterId,
-                                                  prologOps, propOpsToEpilog)))
-        return failure();
+      if (opIdSets.count(loopOpNum - 1) || bbId == loopBlkId) {
+        builder.setInsertionPointToStart(epiBlk);
+        if (failed(completeUnexecutedOperationsInBB(
+                epiBlk, bbId, termIterId, prologOps, propOpsToEpilog)))
+          return failure();
+      }
       newBlocks.push_back(epiBlk);
 
       // create the prolog block for bbId's block for loop continuation
@@ -840,6 +843,10 @@ LogicalResult ModuloScheduleAdapter::adaptCFGWithLoopMS() {
     addPropagateValue(controlOp, propOp->getResult(0), loopCond);
   }
 
+  for (auto blk : newBlocks)
+    if (blk->getOperations().empty()) {
+      blk->erase();
+    }
   removeTempletBlock();
   removeUselessBlockArg();
   return success();

@@ -199,7 +199,6 @@ struct ASMGenTemporalCGRAPass
       llvm::errs() << "Failed to create scheduler and solve\n";
       return signalPassFailure();
     }
-    // return;
 
     // assign schedule results and produce assembly
     // scheduler.readScheduleResult("temporalSpatialSchedule.csv");
