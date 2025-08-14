@@ -747,6 +747,41 @@ static double getLiveOutAffinityCost(Operation *op, ScheduleUnit opUnit,
                                      std::vector<ValuePlacement> finiGraph,
                                      GridAttribute grid, int height) {
   double cost = 0;
+  if (op->getNumResults() == 0)
+    return cost;
+
+  // if the op has a consumer who only takes its value in the finiGraph,
+  // evaluate the affinity cost to the liveout
+  for (auto singleUser : op->getResult(0).getUsers()) {
+    if (singleUser->getNumResults() == 0)
+      continue;
+    // check whether the singleUser only consumes op's value
+    int producerCount = 1;
+    for (auto opr : singleUser->getOperands()) {
+      if (opr.getDefiningOp() == op)
+        continue;
+      if (isa<BlockArgument>(opr) ||
+          !isa<arith::ConstantOp>(opr.getDefiningOp())) {
+        producerCount++;
+        break;
+      }
+    }
+    if (producerCount > 1)
+      continue;
+
+    // evaluate the op's pe distance to the liveout PE
+    auto liveOutIt = std::find_if(
+        finiGraph.begin(), finiGraph.end(), [&](const ValuePlacement &place) {
+          return place.val == singleUser->getResult(0);
+        });
+    if (liveOutIt == finiGraph.end())
+      continue;
+    // if the liveout is not in the finiGraph, return 0
+    int childDistance =
+        getDistance(opUnit.pe, liveOutIt->pe, grid.nRow, grid.nCol);
+    cost += 0.5 * childDistance / (grid.nRow / 2 + grid.nCol / 2);
+  }
+
   // if op is a route liveout operation, evaluate its PE from the liveout
   // requirement
   // initialize a queue to store the route operations

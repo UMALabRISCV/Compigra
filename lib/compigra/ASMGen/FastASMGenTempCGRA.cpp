@@ -15,6 +15,7 @@
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
 #include "compigra/Scheduler/BasicBlockOpAssignment.h"
+#include "compigra/Scheduler/ModuloScheduleAdapter.h"
 #include "compigra/Support/OpenEdgeASM.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -315,7 +316,8 @@ void updateGlobalValPlacement(
     std::map<Block *, SetVector<Value>> &liveIns,
     std::map<Block *, SetVector<Value>> &liveOuts,
     std::map<Block *, std::vector<ValuePlacement>> &bbInitGraphs,
-    std::map<Block *, std::vector<ValuePlacement>> &bbFiniGraphs) {
+    std::map<Block *, std::vector<ValuePlacement>> &bbFiniGraphs,
+    bool forceInteral = false) {
   // update liveness graph if graph transformation is performed
   computeLiveValue(region, liveIns, liveOuts);
 
@@ -347,10 +349,12 @@ void updateGlobalValPlacement(
   }
 
   // update the global value placement with the updated initGraph
-  for (auto valPlace : initGraph) {
+  for (auto &valPlace : initGraph) {
     auto val = valPlace.val;
     auto pe = valPlace.pe;
-    auto regAttr = valPlace.regAttr;
+    auto &regAttr = valPlace.regAttr;
+    if (forceInteral)
+      regAttr = RegAttr::IN;
     // find the corresponding value if it is live in other bb's initGraph or
     // finiGraph
     auto curBlk = updateBlk;
@@ -359,10 +363,12 @@ void updateGlobalValPlacement(
   }
 
   // update the global value placement with the updated finiGraph
-  for (auto valPlace : finiGraph) {
+  for (auto &valPlace : finiGraph) {
     auto val = valPlace.val;
     auto pe = valPlace.pe;
-    auto regAttr = valPlace.regAttr;
+    auto &regAttr = valPlace.regAttr;
+    if (forceInteral)
+      regAttr = RegAttr::IN;
     // find the corresponding value if it is live in other bb's initGraph or
     // finiGraph
     auto curBlk = updateBlk;
@@ -387,7 +393,15 @@ void calculateTemporalSpatialSchedule(
   for (auto &block : region.getBlocks()) {
     int alignStartTime = kernelTime;
     int endTime = kernelTime;
-    auto bbStart = 1;
+    int bbStart = INT32_MAX;
+    for (auto &op : block.getOperations()) {
+      if (solution.find(&op) == solution.end())
+        continue;
+      if (solution[&op].time < bbStart) {
+        bbStart = solution[&op].time;
+      }
+    }
+
     auto gap = kernelTime - bbStart;
     // blockStartT[&block] = alignStartTime;
     for (auto &op : block.getOperations()) {
@@ -419,10 +433,9 @@ void calculateTemporalSpatialSchedule(
   llvm::errs() << "Temporal spatial schedule is saved to " << fileName << "\n";
 }
 
-static std::map<int, placeunit>
-getRandomInitialPlacement(std::map<int, SetVector<Value>> nodes,
-                          std::map<int, std::set<int>> interGraph,
-                          GridAttribute attr) {
+static std::map<int, placeunit> getRandomInitialPlacement(
+    std::map<int, SetVector<Value>> nodes, GridAttribute attr,
+    const std::vector<ValuePlacement> liveValPlacement = {}) {
   std::map<int, placeunit> initialPlacement;
 
   for (auto &[index, vals] : nodes) {
@@ -430,8 +443,22 @@ getRandomInitialPlacement(std::map<int, SetVector<Value>> nodes,
       continue;
     // get the placement for vals
 
-    auto pe = std::rand() % (attr.nRow * attr.nCol);
-    initialPlacement[index] = {pe, RegAttr::NK};
+    // if find any vals in liveValPlacement, use the placement
+    bool useExisting = false;
+    for (auto val : vals) {
+      auto it =
+          std::find_if(liveValPlacement.begin(), liveValPlacement.end(),
+                       [&](const ValuePlacement &vp) { return vp.val == val; });
+      if (it != liveValPlacement.end()) {
+        initialPlacement[index] = {it->pe, it->regAttr};
+        useExisting = true;
+        break;
+      }
+    }
+    if (useExisting)
+      continue;
+    // auto pe = std::rand() % (attr.nRow * attr.nCol);
+    // initialPlacement[index] = {pe, RegAttr::NK};
   }
   return initialPlacement;
 }
@@ -445,6 +472,8 @@ double computeInitialPlacementCost(std::map<int, compigra::placeunit> result,
   std::vector<int> regUseCount = std::vector<int>(16, 0);
   int maxReg = 0;
   for (auto &[index, place] : result) {
+    if (place.second == RegAttr::EX)
+      continue;
     auto pe = place.first;
     regUseCount[pe]++;
     maxReg = std::max(maxReg, regUseCount[pe]);
@@ -526,21 +555,21 @@ double computeInitialPlacementCost(std::map<int, compigra::placeunit> result,
   }
   affinityCost = affinityCost == 0.0 ? 0.0 : affinityCost / costsCount;
 
-  std::string message;
-  llvm::raw_string_ostream rso(message);
-  rso << "Nodes:\n";
-  for (auto &[index, vals] : nodes) {
-    rso << "index: " << index << "\n";
-    for (auto val : vals) {
-      rso << "  " << val << "\n";
-    }
-    rso << "Placement: " << result[index].first
-        << " reg attr: " << result[index].second << "\n";
-    rso << "\n";
-  }
-  rso << "Cost: " << stdDev << " " << affinityCost << " = "
-      << (stdDev + affinityCost) << "\n";
-  logMessage(rso.str());
+  // std::string message;
+  // llvm::raw_string_ostream rso(message);
+  // rso << "Nodes:\n";
+  // for (auto &[index, vals] : nodes) {
+  //   rso << "index: " << index << "\n";
+  //   for (auto val : vals) {
+  //     rso << "  " << val << "\n";
+  //   }
+  //   rso << "Placement: " << result[index].first
+  //       << " reg attr: " << result[index].second << "\n";
+  //   rso << "\n";
+  // }
+  // rso << "Cost: " << stdDev << " " << affinityCost << " = "
+  //     << (stdDev + affinityCost) << "\n";
+  // logMessage(rso.str());
 
   cost = stdDev + affinityCost;
   return cost;
@@ -550,7 +579,8 @@ void optimizeAcrossBBValuePlacement(
     int nRow, int nCol, std::map<Block *, SetVector<Value>> liveIns,
     std::map<Block *, SetVector<Value>> liveOuts,
     std::map<Block *, std::vector<ValuePlacement>> &bbInitGraphs,
-    std::map<Block *, std::vector<ValuePlacement>> &bbFiniGraphs) {
+    std::map<Block *, std::vector<ValuePlacement>> &bbFiniGraphs,
+    const std::vector<ValuePlacement> liveValPlacement = {}) {
   DenseSet<Value> allLiveValues;
   for (auto &[blk, liveIn] : liveIns) {
     for (auto val : liveIn)
@@ -576,43 +606,11 @@ void optimizeAcrossBBValuePlacement(
     nodes[nodes.size()] = relatedVals;
   }
 
-  auto processLiveSet = [&](const std::map<Block *, SetVector<Value>> &liveSet,
-                            SetVector<mlir::Value> checkVals,
-                            std::set<int> &interSet) {
-    for (auto [_, liveVals] : liveSet) {
-      bool findNode = false;
-      for (auto val : checkVals) {
-        if (liveVals.count(val) > 0) {
-          findNode = true;
-          break;
-        }
-      }
-      if (!findNode)
-        continue;
-      // insert all node index of liveVals into interSet
-      for (auto [ind, liveVal] : llvm::enumerate(liveVals)) {
-        if (checkVals.count(liveVal) > 0)
-          continue; // skip the node itself
-        interSet.insert(ind);
-      }
-    }
-  };
-
-  std::map<int, std::set<int>> interGraph;
-  for (auto node : nodes) {
-    auto vals = node.second;
-    std::set<int> interSet;
-
-    processLiveSet(liveIns, vals, interSet);
-    processLiveSet(liveOuts, vals, interSet);
-    interGraph[node.first] = interSet;
-  }
-
   GridAttribute gridAttr = GridAttribute{nRow, nCol, 4};
   std::map<int, compigra::placeunit> optimal;
   double minCost = 1e3;
-  for (auto iter = 0; iter < 100; iter++) {
-    auto place = getRandomInitialPlacement(nodes, interGraph, gridAttr);
+  for (auto iter = 0; iter < 10; iter++) {
+    auto place = getRandomInitialPlacement(nodes, gridAttr, liveValPlacement);
     // evaluate the placement
     double cost = computeInitialPlacementCost(place, nodes, liveIns, gridAttr);
     if (cost < minCost) {
@@ -644,10 +642,12 @@ void optimizeAcrossBBValuePlacement(
         }
       }
     }
-    if (maxUser >= 5) {
+
+    if (maxUser >= 5 && optimal[externId].second == RegAttr::NK) {
       // assign externId to IE
       optimal[externId].second = RegAttr::IE;
     }
+
     for (auto index : valIds) {
       if (maxUser >= 5 && index == externId)
         continue;
@@ -675,12 +675,12 @@ void optimizeAcrossBBValuePlacement(
                              [&](const std::pair<int, SetVector<Value>> &pair) {
                                return pair.second.count(val) > 0;
                              });
-      if (it != nodes.end()) {
-        auto pe = optimal[it->first].first;
-        auto regAttr = optimal[it->first].second;
+      if (it != nodes.end() && optimal.count(it->first)) {
+        auto pe = optimal.at(it->first).first;
+        auto regAttr = optimal.at(it->first).second;
         initGraph.push_back(
-            ValuePlacement{val, (unsigned)optimal[it->first].first,
-                           optimal[it->first].second}); // pe, regAttr
+            ValuePlacement{val, (unsigned)optimal.at(it->first).first,
+                           optimal.at(it->first).second}); // pe, regAttr
       }
     }
     bbInitGraphs[bb] = initGraph;
@@ -695,16 +695,122 @@ void optimizeAcrossBBValuePlacement(
                              [&](const std::pair<int, SetVector<Value>> &pair) {
                                return pair.second.count(val) > 0;
                              });
-      if (it != nodes.end()) {
-        auto pe = optimal[it->first].first;
-        auto regAttr = optimal[it->first].second;
+      if (it != nodes.end() && optimal.count(it->first)) {
+        auto pe = optimal.at(it->first).first;
+        auto regAttr = optimal.at(it->first).second;
         finiGraph.push_back(
-            ValuePlacement{val, (unsigned)optimal[it->first].first,
-                           optimal[it->first].second}); // pe, regAttr
+            ValuePlacement{val, (unsigned)optimal.at(it->first).first,
+                           optimal.at(it->first).second}); // pe, regAttr
       }
     }
     bbFiniGraphs[bb] = finiGraph;
   }
+}
+
+static LogicalResult preScheduleUsingModuloScheduler(
+    func::FuncOp funcOp, std::string outputDAG, std::string pythonExectuable,
+    Region &r, OpBuilder &builder,
+    std::vector<ValuePlacement> &globalConstraint,
+    SmallVector<Block *, 4> &preScheduledBlks,
+    std::map<mlir::Operation *, compigra::ScheduleUnit> &globalSolution,
+    unsigned peGridSize = 4, unsigned maxReg = 3) {
+  // Find the loop block
+  int bbInd = -1;
+  liveVec schedulerRequirements;
+  for (auto &blk : llvm::make_early_inc_range(funcOp.getBlocks())) {
+    bbInd++;
+    bool isLoop =
+        std::find(blk.getSuccessors().begin(), blk.getSuccessors().end(),
+                  &blk) != blk.getSuccessors().end();
+    if (!isLoop)
+      continue;
+
+    // initialize print function
+    satmapit::PrintSatMapItDAG printer(blk.getTerminator());
+    printer.init();
+    if (failed(printer.printDAG(outputDAG + "/bb" + std::to_string(bbInd))))
+      continue;
+
+    // detect whether the python executable exist
+    std::string command = pythonExectuable + " -path " + outputDAG +
+                          "/ -bench bb" + std::to_string(bbInd) + " -x " +
+                          std::to_string(peGridSize) + " -y " +
+                          std::to_string(peGridSize) + " > " + outputDAG +
+                          "/out_raw_bb" + std::to_string(bbInd) + ".sat\n";
+
+    // call the python code script to solve the MS
+    llvm::errs() << "---> Running the SAT-Solver: \n" << command;
+
+    int result = system(command.c_str());
+    if (result != 0)
+      continue;
+    llvm::errs() << "SAT-solver done\n";
+    // read the result and update the schedule
+    std::string mapResult =
+        outputDAG + "/out_raw_bb" + std::to_string(bbInd) + ".sat";
+    int opSize = blk.getOperations().size();
+
+    int II;
+    std::map<int, Instruction> instructions;
+    std::map<int, std::set<int>> opTimeMap;
+    std::vector<std::set<int>> basicBlocksWithOpIds = {};
+    if (failed(readMapFile(mapResult, maxReg,
+                           opSize + blk.getNumArguments() - 1, II, opTimeMap,
+                           basicBlocksWithOpIds, instructions)))
+      continue;
+
+    std::map<int, int> execTime = getLoopOpUnfoldExeTime(opTimeMap);
+    if (!kernelOverlap(basicBlocksWithOpIds))
+      continue;
+
+    llvm::errs() << "II: " << II << "\n\n";
+    if (failed(initBlockArgs(&blk, instructions, builder)))
+      return failure();
+
+    ModuloScheduleAdapter adapter(r, &blk, builder, II, execTime, opTimeMap,
+                                  basicBlocksWithOpIds);
+    if (failed(adapter.init()))
+      continue;
+
+    if (failed(adapter.adaptCFGWithLoopMS()))
+      return failure();
+
+    // assign basic block with the schedule result
+    if (failed(adapter.assignScheduleResult(instructions, schedulerRequirements,
+                                            maxReg, peGridSize * peGridSize)))
+      return failure();
+    auto prereq = adapter.getPrerequisites();
+    schedulerRequirements.insert(schedulerRequirements.end(), prereq.begin(),
+                                 prereq.end());
+
+    //  write the schedule result to global constraint with register attributes
+    auto sol = adapter.getSolutions();
+    for (auto [op, su] : sol)
+      globalSolution[op] = su;
+
+    for (auto &valPlace : prereq) {
+      Value val = valPlace.first;
+      auto pe = valPlace.second;
+      RegAttr regAttr = RegAttr::IN;
+      if (val.getDefiningOp() && sol.count(val.getDefiningOp())) {
+        if (sol[val.getDefiningOp()].reg == maxReg)
+          regAttr = RegAttr::EX;
+      }
+
+      globalConstraint.push_back(
+          ValuePlacement{val, (unsigned)pe, regAttr}); // pe, regAttr
+      for (auto blk : adapter.getNewBlocks()) {
+        if (std::find(preScheduledBlks.begin(), preScheduledBlks.end(), blk) ==
+            preScheduledBlks.end()) {
+          preScheduledBlks.push_back(blk);
+        }
+      }
+      // preScheduledBlks.insert(preScheduledBlks.end(),
+      //                         adapter.getNewBlocks().begin(),
+      //                         adapter.getNewBlocks().end());
+    }
+  }
+  return success();
 }
 
 namespace {
@@ -731,6 +837,27 @@ struct FastASMGenTemporalCGRAPass
     std::map<Block *, std::vector<ValuePlacement>> bbInitGraphs;
     std::map<Block *, std::vector<ValuePlacement>> bbFiniGraphs;
 
+    unsigned maxReg = 4;
+    std::vector<ValuePlacement> liveValPlacement;
+    SmallVector<Block *, 4> preScheduledBlks;
+    std::map<mlir::Operation *, compigra::ScheduleUnit> rawSolution;
+
+    size_t lastSlashPos = outDir.find_last_of("/");
+    bool msEnable = false;
+    // if msOpt is empty, skip the pre-schedule
+    if (!msOpt.empty()) {
+      if (failed(preScheduleUsingModuloScheduler(
+              funcOp, outDir.substr(0, lastSlashPos) + "/IR_opt/satmapit",
+              msOpt.substr(1, msOpt.size() - 2), region, builder,
+              liveValPlacement, preScheduledBlks, rawSolution, nRow, maxReg))) {
+        llvm::errs() << funcOp << "\n";
+        return signalPassFailure();
+      } else {
+        msEnable = true;
+        llvm::errs() << "MS pre-schedule done\n";
+      }
+    }
+
     computeLiveValue(region, liveIns, liveOuts);
     printBlockLiveValue(region, liveIns, liveOuts);
 
@@ -739,9 +866,7 @@ struct FastASMGenTemporalCGRAPass
     logMessage("BasicBlock op assignment\n", true);
     // initialize the initGraph and finiGraph for each block
     optimizeAcrossBBValuePlacement(nRow, nCol, liveIns, liveOuts, bbInitGraphs,
-                                   bbFiniGraphs);
-
-    std::map<mlir::Operation *, compigra::ScheduleUnit> rawSolution;
+                                   bbFiniGraphs, liveValPlacement);
 
     for (auto &bb : region.getBlocks()) {
       llvm::errs() << "\n";
@@ -750,6 +875,13 @@ struct FastASMGenTemporalCGRAPass
 
       llvm::errs() << "BBId: " + std::to_string(bbId) +
                           "==============================\n";
+      bbId++;
+
+      logMessage("InitGraph: ");
+      printLiveGraph(bbInitGraphs);
+      logMessage("FiniGraph:");
+      printLiveGraph(bbFiniGraphs);
+
       // Init operation assginer
       BasicBlockOpAssignment bbOpAssignment(&bb, 4, nRow, nCol, builder);
       auto zeroIntOp = getZeroConstant(region, builder);
@@ -759,7 +891,18 @@ struct FastASMGenTemporalCGRAPass
       // set up liveness prerequisite
       bbOpAssignment.setPrerequisiteToStartGraph(bbInitGraphs[&bb]);
       bbOpAssignment.setPrerequisiteToFinishGraph(bbFiniGraphs[&bb]);
-      if (failed(bbOpAssignment.mappingBBdataflowToCGRA(liveIns, liveOuts))) {
+
+      if (std::find(preScheduledBlks.begin(), preScheduledBlks.end(), &bb) !=
+          preScheduledBlks.end())
+        continue;
+      if (succeeded(
+              bbOpAssignment.mappingBBdataflowToCGRA(liveIns, liveOuts))) {
+        auto soluBB = bbOpAssignment.getSolution();
+        // write soluBB into rawSolution
+        for (auto [op, unit] : soluBB) {
+          rawSolution[op] = unit;
+        }
+      } else {
         // DEBUG, print the liveIn and liveOut and their placement
         llvm::errs() << "Failed to map BB dataflow to CGRA\n";
         llvm::errs() << "LiveIn: ";
@@ -809,12 +952,6 @@ struct FastASMGenTemporalCGRAPass
         return signalPassFailure();
       }
 
-      auto soluBB = bbOpAssignment.getSolution();
-      // write soluBB into rawSolution
-      for (auto [op, unit] : soluBB) {
-        rawSolution[op] = unit;
-      }
-
       // print the initGraph and finiGraph of the block
       auto initGraph = bbOpAssignment.getStartEmbeddingGraph();
       auto finiGraph = bbOpAssignment.getFiniEmbeddingGraph();
@@ -824,7 +961,7 @@ struct FastASMGenTemporalCGRAPass
       // update the liveIn and liveOut with the initGraph and finiGraph
       // computeLiveValue(region, liveIns, liveOuts);
       updateGlobalValPlacement(&bb, region, liveIns, liveOuts, bbInitGraphs,
-                               bbFiniGraphs);
+                               bbFiniGraphs, msEnable);
       logMessage("InitGraph: ");
       printLiveGraph(bbInitGraphs);
       logMessage("FiniGraph:");
@@ -832,7 +969,6 @@ struct FastASMGenTemporalCGRAPass
 
       // if (bbId == 4)
       //   break;
-      bbId++;
     }
 
     // organize the rawSolution to a final solution
