@@ -128,30 +128,35 @@ def FuncOp : Cgra_Op<"func", [
   let hasCustomAssemblyFormat = 1;
 }
 
-def BlasGemmOp : Cgra_Op<"gemm_blas",
-                         [Pure, MemoryEffectsOpInterface, IsolatedFromAbove]> {
+def BlasGemmOp : Cgra_Op<"gemm_blas", [MemoryEffectsOpInterface, IsolatedFromAbove]> {
   let summary = "specialized gemm kernel for assembly generation";
   let description = [{
-    The gemm_blas operation represents pre -
-    compiled assembly code would be generated with the input.
-
+    The gemm_blas operation represents pre-compiled assembly code 
+    that would be generated with the input.
+    
     Example:
-      ``` gemm_blas(% inner_bound, % middle_bound, % outer_bound, % in_mat1,
-                     % in_mat2, % out_mat)      ```
+    ```
+    gemm_blas(%inner_bound, %middle_bound, %outer_bound, %in_mat1,
+              %in_mat2, %out_mat)
+    ```
   }];
-
-  let arguments = (ins AnyTypeOf<[Index, AnyInteger]>
-                   : $innerBound, AnyTypeOf<[Index, AnyInteger]>
-                   : $middleBound, AnyTypeOf<[Index, AnyInteger]>
-                   : $outerBound,
-                   AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> :$matIn1,
-                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> :$matIn2,
-                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> :$matOut);
-
+  
+  let arguments = (ins AnyTypeOf<[Index, AnyInteger]> : $innerBound, 
+                       AnyTypeOf<[Index, AnyInteger]> : $middleBound, 
+                       AnyTypeOf<[Index, AnyInteger]> : $outerBound,
+                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matIn1,
+                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matIn2,
+                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matOut);
+  
   let hasCustomAssemblyFormat = 1;
-
   let hasVerifier = 1;
+  
+  // Add this for memory effects
+  let extraClassDeclaration = [{
+    void getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>> &effects);
+  }];
 }
+
 
 def MergeOp : Cgra_Op<"merge", [
   Pure, MergeLikeOpInterface, SOSTInterface, SameOperandsAndResultType

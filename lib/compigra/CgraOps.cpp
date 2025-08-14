@@ -375,6 +375,14 @@ LogicalResult cgra::BlasGemmOp::verify() {
   return mlir::success();
 }
 
+using MemoryEffectList = ::llvm::SmallVectorImpl<
+    ::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>>;
+
+void BlasGemmOp::getEffects(MemoryEffectList &effects) {
+  effects.emplace_back(mlir::MemoryEffects::Write::get());
+  effects.emplace_back(mlir::MemoryEffects::Read::get());
+}
+
 void MergeOp::print(OpAsmPrinter &p) { sostPrint(p, false); }
 
 LogicalResult MergeOp::verify() {
