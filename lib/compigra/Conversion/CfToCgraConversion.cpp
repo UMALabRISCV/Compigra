@@ -13,7 +13,6 @@
 
 #include "compigra/Conversion/CfToCgraConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/MLIRContext.h"
@@ -645,11 +644,94 @@ void compigra::populateCfToCgraConversionPatterns(
                                             globalConstAddrs);
 }
 
+static void transformkernelBLAS(func::FuncOp funcOp, OpBuilder &builder) {
+  // if find a blas gemm operation, create a new block for it
+  SmallVector<cgra::BlasGemmOp> blasOps;
+  for (auto op : funcOp.getOps<cgra::BlasGemmOp>()) {
+    // revise the operands of op
+    // if the operands is memref type -> memref.load %opr[cst0]
+    // Assuming this is within a pattern rewriter or transformation pass
+    OpBuilder builder(op);
+    SmallVector<Value> newOperands;
+
+    for (auto operand : op.getOperands()) {
+      auto blockArg = dyn_cast<BlockArgument>(operand);
+      if (!blockArg) {
+        newOperands.push_back(operand);
+        continue;
+      }
+
+      auto memrefType = dyn_cast<MemRefType>(blockArg.getType());
+      if (!memrefType) {
+        newOperands.push_back(operand);
+        continue;
+      }
+
+      if (memrefType.getRank() != 1 ||
+          !memrefType.getElementType().isInteger(32)) {
+        newOperands.push_back(operand);
+        continue;
+      }
+
+      auto baseOp =
+          builder.create<cgra::LwdOp>(op.getLoc(), builder.getI32Type());
+      baseOp->setAttr("BaseAddr",
+                      builder.getStringAttr(
+                          "arg" + std::to_string(blockArg.getArgNumber())));
+
+      newOperands.push_back(baseOp->getResult(0));
+    }
+
+    // Update the operation with new operands
+    op->setOperands(newOperands);
+    blasOps.push_back(op);
+  }
+  if (blasOps.empty())
+    return;
+
+  // create a new block for the blas gemm operation
+  for (auto blasOp : blasOps) {
+    auto sucBlk = blasOp->getBlock();
+    builder.setInsertionPoint(blasOp);
+    auto predArgs = sucBlk->getArguments();
+    auto predBlk = builder.createBlock(sucBlk);
+    // replace of sucBlk arguments with predBlk arguments and remove it
+    for (auto [ind, arg] : llvm::enumerate(sucBlk->getArguments())) {
+      predBlk->addArgument(arg.getType(), blasOp->getLoc());
+      arg.replaceAllUsesWith(predBlk->getArgument(ind));
+    }
+
+    while (!sucBlk->args_empty()) {
+      sucBlk->eraseArgument(0);
+    }
+
+    auto curBlk = builder.createBlock(sucBlk);
+    // add a jump operation from predBlk to curBlk
+    builder.setInsertionPointToEnd(predBlk);
+    builder.create<cf::BranchOp>(blasOp->getLoc(), curBlk);
+
+    for (auto &op : llvm::make_early_inc_range(sucBlk->getOperations())) {
+      if (&op == blasOp)
+        break;
+
+      op.moveBefore(predBlk->getTerminator());
+    }
+
+    // add a jump operation from curBlk to sucBlk
+    builder.setInsertionPointToEnd(curBlk);
+    builder.create<cf::BranchOp>(blasOp->getLoc(), sucBlk);
+    // move cgra.BlasGemmOp to curBlk
+    blasOp->moveBefore(curBlk->getTerminator());
+  }
+}
+
 void CfToCgraConversionPass::runOnOperation() {
   ModuleOp modOp = dyn_cast<ModuleOp>(getOperation());
   OpBuilder builder(modOp);
   std::map<llvm::StringRef, Operation *> globalConstAddrs;
   SmallVector<Operation *> constAddrs;
+
+  transformkernelBLAS(*modOp.getOps<func::FuncOp>().begin(), builder);
 
   // Map to store the stride information for each memory reference, where
   // the key is the constant value of the base address.

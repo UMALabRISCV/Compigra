@@ -52,7 +52,7 @@ def LLVMToCgraConversion : Pass<"convert-llvm-to-cgra"> {
 def CfToCgraConversion : Pass<"convert-cf-to-cgra"> {
   let summary = "Convert CF to CGRA dialect";
   let constructor = "compigra::createCfToCgraConversion()";
-  let dependentDialects = ["cgra::CgraDialect"];
+  let dependentDialects = ["cgra::CgraDialect", "cf::ControlFlowDialect"];
   let options = [ListOption<"startAddr", "start-addr", "int",
                             "    Specify the start address of the parameters">];
 }

@@ -144,9 +144,9 @@ def BlasGemmOp : Cgra_Op<"gemm_blas",
                    : $innerBound, AnyTypeOf<[Index, AnyInteger]>
                    : $middleBound, AnyTypeOf<[Index, AnyInteger]>
                    : $outerBound,
-                   AnyRankedOrUnrankedMemRef:$matIn1,
-                       AnyRankedOrUnrankedMemRef:$matIn2,
-                       AnyRankedOrUnrankedMemRef:$matOut);
+                   AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> :$matIn1,
+                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> :$matIn2,
+                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> :$matOut);
 
   let hasCustomAssemblyFormat = 1;
 
