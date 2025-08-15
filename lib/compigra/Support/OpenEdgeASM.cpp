@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "compigra/Support/OpenEdgeASM.h"
+#include "compigra/ASMGen/mmul_blas_asm.h"
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
 #include "compigra/Scheduler/KernelSchedule.h"
@@ -706,6 +707,8 @@ std::string OpenEdgeASMGen::printInstructionToISA(Operation *op,
   // If it is return, return EXIT
   if (isa<LLVM::ReturnOp, func::ReturnOp>(op))
     return "EXIT";
+  if (isa<cgra::BlasGemmOp>(op))
+    return "";
 
   // Drop the dialect prefix
   size_t pos = op->getName().getStringRef().find(".");
@@ -801,8 +804,13 @@ std::string OpenEdgeASMGen::printInstructionToISA(Operation *op,
   }
 
   if (isa<cgra::LwdOp>(op)) {
-    auto baseAddr = op->getAttrOfType<StringAttr>("BaseAddr").getValue();
-    addition = " " + baseAddr.str();
+    if (op->hasAttr("BaseAddr")) {
+      auto baseAddr = op->getAttrOfType<StringAttr>("BaseAddr").getValue();
+      addition = " " + baseAddr.str();
+    } else if (op->hasAttr("Value")) {
+      auto val = op->getAttrOfType<StringAttr>("Value").getValue();
+      addition += " " + val.str();
+    }
   }
 
   return opName + ROUT + opA + opB + addition;
@@ -833,6 +841,8 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
     Block *block = brOp.getSuccessor();
     int sucTime = getEarliestExecutionTime(block);
     int curTime = getEarliestExecutionTime(brOp);
+    if (sucTime == INT_MAX || curTime == INT_MAX)
+      continue;
     auto ops = getOperationsAtTime(curTime);
     // find the num of op != NOP in ops
     if (sucTime == curTime + 1 && ops.size() == 1)
@@ -866,6 +876,15 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
   for (int t = startT; t <= endTime; t++) {
     // Get the operations scheduled at the time step
     auto ops = getOperationsAtTime(t);
+    if (ops.empty())
+      continue;
+
+    if (ops.count(0) && isa<cgra::BlasGemmOp>(ops.at(0))) {
+      ASMGenBLAS asmSchedule(t);
+      auto blasCode = asmSchedule.generatePreCompileCode();
+      asmCode.insert(asmCode.end(), blasCode.begin(), blasCode.end());
+      continue;
+    }
 
     std::vector<std::string> asmCodeLine;
     bool isNOP = true;

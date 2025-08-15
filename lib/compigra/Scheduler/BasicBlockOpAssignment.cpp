@@ -132,6 +132,10 @@ void computeLiveValue(Region &region,
     }
 
     for (auto &op : block.getOperations()) {
+      if (isa<cgra::BlasGemmOp>(op)) {
+        // skip BlasGemmOp, it directly interfaces with memory
+        continue;
+      }
       for (auto res : op.getResults())
         insertNonConst(res, def);
 

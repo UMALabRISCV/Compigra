@@ -394,6 +394,14 @@ void calculateTemporalSpatialSchedule(
     int alignStartTime = kernelTime;
     int endTime = kernelTime;
     int bbStart = INT32_MAX;
+
+    Operation *blasKernel = &block.getOperations().front();
+    if (isa<cgra::BlasGemmOp>(blasKernel)) {
+      solution[blasKernel] = {(int)kernelTime, 0};
+      kernelTime += 27;
+      continue;
+    }
+
     for (auto &op : block.getOperations()) {
       if (solution.find(&op) == solution.end())
         continue;
@@ -707,7 +715,7 @@ void optimizeAcrossBBValuePlacement(
   }
 }
 
-static LogicalResult preScheduleUsingModuloScheduler(
+static LogicalResult preScheduleWithExternalSupport(
     func::FuncOp funcOp, std::string outputDAG, std::string pythonExectuable,
     Region &r, OpBuilder &builder,
     std::vector<ValuePlacement> &globalConstraint,
@@ -719,6 +727,12 @@ static LogicalResult preScheduleUsingModuloScheduler(
   liveVec schedulerRequirements;
   for (auto &blk : llvm::make_early_inc_range(funcOp.getBlocks())) {
     bbInd++;
+    // check whether the block can be compiled using blas
+    if (isa<cgra::BlasGemmOp>(blk.getOperations().front())) {
+      preScheduledBlks.push_back(&blk);
+      continue;
+    }
+
     bool isLoop =
         std::find(blk.getSuccessors().begin(), blk.getSuccessors().end(),
                   &blk) != blk.getSuccessors().end();
@@ -846,7 +860,7 @@ struct FastASMGenTemporalCGRAPass
     bool msEnable = false;
     // if msOpt is empty, skip the pre-schedule
     if (!msOpt.empty()) {
-      if (failed(preScheduleUsingModuloScheduler(
+      if (failed(preScheduleWithExternalSupport(
               funcOp, outDir.substr(0, lastSlashPos) + "/IR_opt/satmapit",
               msOpt.substr(1, msOpt.size() - 2), region, builder,
               liveValPlacement, preScheduledBlks, rawSolution, nRow, maxReg))) {
