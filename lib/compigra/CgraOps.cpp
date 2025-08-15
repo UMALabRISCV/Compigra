@@ -306,15 +306,16 @@ ParseResult BlasGemmOp::parse(mlir::OpAsmParser &parser,
 
   // Parse structure: [ %idx1 : type , %idx2 : type , %idx3 : type , %mem1 :
   // type , %mem2 : type , %mem3 : type ]
-  if (parser.parseLSquare() || parser.parseOperand(idx1) ||
-      parser.parseColonType(idx1Type) || parser.parseComma() ||
-      parser.parseOperand(idx2) || parser.parseColonType(idx2Type) ||
-      parser.parseComma() || parser.parseOperand(idx3) ||
-      parser.parseColonType(idx3Type) || parser.parseComma() ||
-      parser.parseOperand(mem1) || parser.parseColonType(mem1Type) ||
-      parser.parseComma() || parser.parseOperand(mem2) ||
-      parser.parseColonType(mem2Type) || parser.parseComma() ||
-      parser.parseOperand(mem3) || parser.parseColonType(mem3Type) ||
+  if (parser.parseLSquare() || parser.parseOperand(mem1) ||
+      parser.parseColonType(mem1Type) || parser.parseComma() ||
+      parser.parseOperand(mem2) || parser.parseColonType(mem2Type) ||
+      parser.parseComma() || parser.parseOperand(mem3) ||
+      parser.parseColonType(mem3Type) || parser.parseComma() ||
+      parser.parseOperand(idx1) || parser.parseColonType(idx1Type) ||
+      parser.parseComma() || parser.parseOperand(idx2) ||
+      parser.parseColonType(idx2Type) || parser.parseComma() ||
+      parser.parseOperand(idx3) || parser.parseColonType(idx3Type) ||
+
       parser.parseRSquare()) {
     return failure();
   }
@@ -324,12 +325,12 @@ ParseResult BlasGemmOp::parse(mlir::OpAsmParser &parser,
     return failure();
 
   // Resolve operands
-  if (parser.resolveOperand(idx1, idx1Type, result.operands) ||
-      parser.resolveOperand(idx2, idx2Type, result.operands) ||
-      parser.resolveOperand(idx3, idx3Type, result.operands) ||
-      parser.resolveOperand(mem1, mem1Type, result.operands) ||
+  if (parser.resolveOperand(mem1, mem1Type, result.operands) ||
       parser.resolveOperand(mem2, mem2Type, result.operands) ||
-      parser.resolveOperand(mem3, mem3Type, result.operands)) {
+      parser.resolveOperand(mem3, mem3Type, result.operands) ||
+      parser.resolveOperand(idx1, idx1Type, result.operands) ||
+      parser.resolveOperand(idx2, idx2Type, result.operands) ||
+      parser.resolveOperand(idx3, idx3Type, result.operands)) {
     return failure();
   }
 
@@ -337,12 +338,12 @@ ParseResult BlasGemmOp::parse(mlir::OpAsmParser &parser,
 }
 
 void BlasGemmOp::print(mlir::OpAsmPrinter &printer) {
-  printer << " [" << getInnerBound() << " : " << getInnerBound().getType()
-          << ", " << getMiddleBound() << " : " << getMiddleBound().getType()
-          << ", " << getOuterBound() << " : " << getOuterBound().getType()
-          << ", " << getMatIn1() << " : " << getMatIn1().getType() << ", "
+  printer << " [" << getMatIn1() << " : " << getMatIn1().getType() << ", "
           << getMatIn2() << " : " << getMatIn2().getType() << ", "
-          << getMatOut() << " : " << getMatOut().getType() << "]";
+          << getMatOut() << " : " << getMatOut().getType() << ", "
+          << getOuterBound() << " : " << getOuterBound().getType() << ", "
+          << getMiddleBound() << " : " << getMiddleBound().getType() << ", "
+          << getInnerBound() << " : " << getInnerBound().getType() << "]";
 
   printer.printOptionalAttrDict((*this)->getAttrs());
 }

@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "compigra/Conversion/CfToCgraConversion.h"
+// #include "compigra/"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -644,6 +645,70 @@ void compigra::populateCfToCgraConversionPatterns(
                                             globalConstAddrs);
 }
 
+static void getBLASArguments(cgra::BlasGemmOp op,
+                             SmallVector<Value> &newOperands,
+                             OpBuilder &builder) {
+  for (auto operand : op.getOperands()) {
+    auto blockArg = dyn_cast<BlockArgument>(operand);
+    if (!blockArg) {
+      newOperands.push_back(operand);
+      continue;
+    }
+
+    auto memrefType = dyn_cast<MemRefType>(blockArg.getType());
+    if (!memrefType) {
+      newOperands.push_back(operand);
+      continue;
+    }
+
+    if (memrefType.getRank() != 1 ||
+        !memrefType.getElementType().isInteger(32)) {
+      newOperands.push_back(operand);
+      continue;
+    }
+
+    auto baseOp =
+        builder.create<cgra::LwdOp>(op.getLoc(), builder.getI32Type());
+    baseOp->setAttr(
+        "BaseAddr",
+        builder.getStringAttr("arg" + std::to_string(blockArg.getArgNumber())));
+
+    newOperands.push_back(baseOp->getResult(0));
+  }
+
+  // create save operation to store the operands to the memory
+  builder.setInsertionPoint(op);
+  for (auto [ind, operand] : llvm::enumerate(newOperands)) {
+    auto addrOp = builder.create<arith::ConstantIntOp>(
+        op.getLoc(), 0xFE00 + ind * 4, builder.getI32Type());
+    builder.create<cgra::SwiOp>(op.getLoc(), operand, addrOp->getResult(0));
+  }
+}
+
+static void connectPredecessorToInitBlk(SmallVector<mlir::Block *> predecessors,
+                                        Block *initBlk, Block *sucBlk) {
+  for (auto *pred : predecessors) {
+    // Get the terminator of the predecessor block
+    Operation *terminator = pred->getTerminator();
+
+    // Handle cf.br (unconditional branch)
+    if (auto brOp = dyn_cast<mlir::cf::BranchOp>(terminator)) {
+      // Change destination from sucBlk to initBlk
+      brOp.setDest(initBlk);
+    }
+    // Handle cf.cond_br (conditional branch)
+    else if (auto condBrOp = dyn_cast<mlir::cf::CondBranchOp>(terminator)) {
+      // Check which successor is sucBlk and update accordingly
+      if (condBrOp.getTrueDest() == sucBlk) {
+        condBrOp->setSuccessor(initBlk, 0);
+      }
+      if (condBrOp.getFalseDest() == sucBlk) {
+        condBrOp->setSuccessor(initBlk, 1);
+      }
+    }
+  }
+}
+
 static void transformkernelBLAS(func::FuncOp funcOp, OpBuilder &builder) {
   // if find a blas gemm operation, create a new block for it
   SmallVector<cgra::BlasGemmOp> blasOps;
@@ -651,36 +716,9 @@ static void transformkernelBLAS(func::FuncOp funcOp, OpBuilder &builder) {
     // revise the operands of op
     // if the operands is memref type -> memref.load %opr[cst0]
     // Assuming this is within a pattern rewriter or transformation pass
-    OpBuilder builder(op);
     SmallVector<Value> newOperands;
-
-    for (auto operand : op.getOperands()) {
-      auto blockArg = dyn_cast<BlockArgument>(operand);
-      if (!blockArg) {
-        newOperands.push_back(operand);
-        continue;
-      }
-
-      auto memrefType = dyn_cast<MemRefType>(blockArg.getType());
-      if (!memrefType) {
-        newOperands.push_back(operand);
-        continue;
-      }
-
-      if (memrefType.getRank() != 1 ||
-          !memrefType.getElementType().isInteger(32)) {
-        newOperands.push_back(operand);
-        continue;
-      }
-
-      auto baseOp =
-          builder.create<cgra::LwdOp>(op.getLoc(), builder.getI32Type());
-      baseOp->setAttr("BaseAddr",
-                      builder.getStringAttr(
-                          "arg" + std::to_string(blockArg.getArgNumber())));
-
-      newOperands.push_back(baseOp->getResult(0));
-    }
+    builder.setInsertionPoint(op);
+    getBLASArguments(op, newOperands, builder);
 
     // Update the operation with new operands
     op->setOperands(newOperands);
@@ -689,39 +727,44 @@ static void transformkernelBLAS(func::FuncOp funcOp, OpBuilder &builder) {
   if (blasOps.empty())
     return;
 
-  // create a new block for the blas gemm operation
+  // create sequential CFG for the blas gemm operation
   for (auto blasOp : blasOps) {
-    auto sucBlk = blasOp->getBlock();
+    auto finiBlk = blasOp->getBlock();
     builder.setInsertionPoint(blasOp);
-    auto predArgs = sucBlk->getArguments();
-    auto predBlk = builder.createBlock(sucBlk);
-    // replace of sucBlk arguments with predBlk arguments and remove it
-    for (auto [ind, arg] : llvm::enumerate(sucBlk->getArguments())) {
-      predBlk->addArgument(arg.getType(), blasOp->getLoc());
-      arg.replaceAllUsesWith(predBlk->getArgument(ind));
+    auto initArg = finiBlk->getArguments();
+    auto initBlk = builder.createBlock(finiBlk);
+
+    // if finiBlk has predecessor blocks, change it to initBlk
+    SmallVector<Block *> predecessors(finiBlk->getPredecessors());
+    connectPredecessorToInitBlk(predecessors, initBlk, finiBlk);
+
+    // store operations in the init blocks
+
+    // replace of finiBlk arguments with initBlk arguments and remove it
+    for (auto [ind, arg] : llvm::enumerate(finiBlk->getArguments())) {
+      initBlk->addArgument(arg.getType(), blasOp->getLoc());
+      arg.replaceAllUsesWith(initBlk->getArgument(ind));
+    }
+    while (!finiBlk->args_empty()) {
+      finiBlk->eraseArgument(0);
     }
 
-    while (!sucBlk->args_empty()) {
-      sucBlk->eraseArgument(0);
-    }
+    auto blasBlk = builder.createBlock(finiBlk);
+    // add a jump operation from predBlk to blasBlk
+    builder.setInsertionPointToEnd(initBlk);
+    builder.create<cf::BranchOp>(blasOp->getLoc(), blasBlk);
 
-    auto curBlk = builder.createBlock(sucBlk);
-    // add a jump operation from predBlk to curBlk
-    builder.setInsertionPointToEnd(predBlk);
-    builder.create<cf::BranchOp>(blasOp->getLoc(), curBlk);
-
-    for (auto &op : llvm::make_early_inc_range(sucBlk->getOperations())) {
+    for (auto &op : llvm::make_early_inc_range(finiBlk->getOperations())) {
       if (&op == blasOp)
         break;
-
-      op.moveBefore(predBlk->getTerminator());
+      op.moveBefore(initBlk->getTerminator());
     }
 
-    // add a jump operation from curBlk to sucBlk
-    builder.setInsertionPointToEnd(curBlk);
-    builder.create<cf::BranchOp>(blasOp->getLoc(), sucBlk);
-    // move cgra.BlasGemmOp to curBlk
-    blasOp->moveBefore(curBlk->getTerminator());
+    // add a jump operation from blasBlk to finiBlk
+    builder.setInsertionPointToEnd(blasBlk);
+    builder.create<cf::BranchOp>(blasOp->getLoc(), finiBlk);
+    // move cgra.BlasGemmOp to blasBlk
+    blasOp->moveBefore(blasBlk->getTerminator());
   }
 }
 
@@ -730,8 +773,6 @@ void CfToCgraConversionPass::runOnOperation() {
   OpBuilder builder(modOp);
   std::map<llvm::StringRef, Operation *> globalConstAddrs;
   SmallVector<Operation *> constAddrs;
-
-  transformkernelBLAS(*modOp.getOps<func::FuncOp>().begin(), builder);
 
   // Map to store the stride information for each memory reference, where
   // the key is the constant value of the base address.
@@ -743,6 +784,9 @@ void CfToCgraConversionPass::runOnOperation() {
     return signalPassFailure();
 
   llvm::errs() << "Memory allocation done\n";
+
+  transformkernelBLAS(*modOp.getOps<func::FuncOp>().begin(), builder);
+
   ConversionTarget target(getContext());
 
   target.addIllegalOp<arith::CmpIOp>();

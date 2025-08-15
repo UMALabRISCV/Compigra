@@ -141,12 +141,12 @@ def BlasGemmOp : Cgra_Op<"gemm_blas", [MemoryEffectsOpInterface, IsolatedFromAbo
     ```
   }];
   
-  let arguments = (ins AnyTypeOf<[Index, AnyInteger]> : $innerBound, 
-                       AnyTypeOf<[Index, AnyInteger]> : $middleBound, 
-                       AnyTypeOf<[Index, AnyInteger]> : $outerBound,
-                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matIn1,
+  let arguments = (ins AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matIn1,
                        AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matIn2,
-                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matOut);
+                       AnyTypeOf<[AnyRankedOrUnrankedMemRef, Index, AnyInteger]> : $matOut,
+                       AnyTypeOf<[Index, AnyInteger]> : $outerBound,
+                       AnyTypeOf<[Index, AnyInteger]> : $middleBound, 
+                       AnyTypeOf<[Index, AnyInteger]> : $innerBound);
   
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
