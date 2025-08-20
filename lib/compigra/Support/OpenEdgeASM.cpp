@@ -427,6 +427,16 @@ std::map<int, std::unordered_set<int>> OpenEdgeASMGen::getPcCtrlFlow() {
   return pcCtrlFlow;
 }
 
+LogicalResult OpenEdgeASMGen::allocateRegisterInRF(
+    std::map<Operation *, Instruction> restriction) {
+  // First write restriction to the solution
+  for (auto [op, inst] : restriction) {
+    instSolution[op] = inst;
+  }
+
+  auto pcCtrlFlow = getPcCtrlFlow();
+}
+
 LogicalResult OpenEdgeASMGen::allocateRegisters(
     std::map<Operation *, Instruction> restriction) {
 
@@ -860,8 +870,8 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
       unit.time -= timeShift;
     }
     auto [_, op] = *ops.begin();
-    if (std::find(dropJumpOps.begin(), dropJumpOps.end(), op) !=
-        dropJumpOps.end()) {
+    if (ops.empty() || std::find(dropJumpOps.begin(), dropJumpOps.end(), op) !=
+                           dropJumpOps.end()) {
       timeShift++;
     }
   }

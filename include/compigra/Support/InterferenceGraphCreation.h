@@ -91,8 +91,16 @@ createInterferenceGraph(std::map<int, mlir::Operation *> &opList,
                         std::map<int, std::pair<Operation *, Value>> &defMap,
                         std::map<int, std::unordered_set<int>> ctrlFlow);
 
-/// Get the successor operations of the `op`. The control flow of CGRA could be
-/// controlled by other PEs, which branch direction is given by ctrlFlow.
+/// Create the interference graph considering all the values in the CGRA grids.
+/// defMap[key, ops] records the time and operations/values produced at that
+/// time.
+InterferenceGraph<int>
+createInterferenceGraph(std::map<int, std::vector<mlir::Operation *>> &opList,
+                        std::map<int, std::pair<Operation *, Value>> &defMap,
+                        std::map<int, std::unordered_set<int>> ctrlFlow);
+
+/// Get the successor operations of the `op`. The control flow of CGRA could
+/// be controlled by other PEs, which branch direction is given by ctrlFlow.
 SmallVector<Operation *>
 getSuccOps(Operation *op, const std::map<int, mlir::Operation *> &opList,
            std::map<int, std::unordered_set<int>> ctrlFlow);

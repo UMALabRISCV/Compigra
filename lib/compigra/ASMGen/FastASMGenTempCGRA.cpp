@@ -989,7 +989,7 @@ struct FastASMGenTemporalCGRAPass
     calculateTemporalSpatialSchedule(region, rawSolution,
                                      "space_temporal_assignment.csv");
     // perform register allocation
-    OpenEdgeASMGen asmGen(region, 3, nRow);
+    OpenEdgeASMGen asmGen(region, maxReg, nRow);
     asmGen.setSolution(rawSolution);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";

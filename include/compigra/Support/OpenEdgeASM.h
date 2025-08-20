@@ -142,6 +142,12 @@ public:
   LogicalResult
   allocateRegisters(std::map<Operation *, Instruction> restriction = {});
 
+  /// Function to allocate registers for the operations within each PE. This
+  /// function considers the hardware model where the PEs have read access to
+  /// neighbour PEs' register file (RF).
+  LogicalResult
+  allocateRegisterInRF(std::map<Operation *, Instruction> restriction = {});
+
 private:
   /// Convert solution with register allocation result to knownRes which
   /// specifies the operand in corresponding register in its producing PE.
