@@ -70,17 +70,12 @@ public:
 
   bool interference(T v1, T v2);
 
-  // bool needColor(T v) {
-  //   if (adjList.find(v) == adjList.end())
-  //     return false;
-  //   return true;
-  // }
   // Vertices of the graph are interferring with other nodes, but does not
   // necessary belong to this PE. vertices records the vertices in the graph and
   // belong to this PE which need to be considered for register allocation.
   // std::vector<T> vertices;
   std::map<T, std::unordered_set<T>> adjList;
-  std::map<T, char> colorMap;
+  std::map<T, int> colorMap;
 };
 
 /// Create the interference graph for the operations in the PE, the

@@ -31,6 +31,11 @@ namespace compigra {
 #define GEN_PASS_DECL_OPENEDGEASMGEN
 #include "compigra/ASMGen/Passes.h.inc"
 
+enum RFAccessModel {
+  Rout_READ = 0, // Neighbour PEs can read the Rout
+  RF_READ = 1,   // Neighbour PEs can read the RF
+};
+
 ///  Allocate registers for the operations in the PE. The register allocation is
 ///  conducted under the pre-colored constraints of `solution`.
 LogicalResult
@@ -68,6 +73,9 @@ public:
   // initialize the region and the maximum number of PEs
   OpenEdgeASMGen(Region &region, unsigned maxReg, unsigned grid)
       : region(region), maxReg(maxReg), nRow(grid), nCol(grid) {}
+
+  void setRFAccessModel(RFAccessModel model) { rfAccessModel = model; }
+  RFAccessModel getRFAccessModel() { return rfAccessModel; }
 
   /// Get the execution time of the operation. If the operation is
   /// executed multiple times, return the first execution time. If the
@@ -119,6 +127,7 @@ private:
   Region &region;
   unsigned maxReg;
   unsigned nRow, nCol;
+  RFAccessModel rfAccessModel = RFAccessModel::Rout_READ;
   SmallVector<Operation *> dropJumpOps;
 
   // The shedule result might not start from 0, the baseTime is the additional
@@ -130,6 +139,13 @@ private:
 
   std::map<int, std::unordered_set<int>> getPcCtrlFlow();
 
+  /// Function to allocate registers for the operations within each PE. This
+  /// function considers the hardware model where the PEs have read access to
+  /// neighbour PEs' register file (RF).
+  LogicalResult allocateRegisterRFAccess();
+
+  LogicalResult allocateRegisterRoutAccess();
+
 public:
   /// Get all operations scheduled at a specific time
   std::map<int, Operation *> getOperationsAtTime(int time);
@@ -137,21 +153,15 @@ public:
   std::map<int, Operation *> getOperationsAtPE(int pe);
 
   /// Function to allocate registers for the operations within each PE. The
-  /// allocation result does not the pre-allocated registers in solution and
+  /// allocation result follows the pre-allocated registers in solution and
   /// allocate registers for other operations.
   LogicalResult
   allocateRegisters(std::map<Operation *, Instruction> restriction = {});
 
-  /// Function to allocate registers for the operations within each PE. This
-  /// function considers the hardware model where the PEs have read access to
-  /// neighbour PEs' register file (RF).
-  LogicalResult
-  allocateRegisterInRF(std::map<Operation *, Instruction> restriction = {});
-
 private:
   /// Convert solution with register allocation result to knownRes which
   /// specifies the operand in corresponding register in its producing PE.
-  LogicalResult convertToInstructionMap();
+  LogicalResult convertToInstructionMap(bool rfAccess = false);
 
   /// Print op to OpenEdge ISA format. If dropNeighbourBr is set, if branch
   /// destination is the next PC below it, it is removed to be NOP;

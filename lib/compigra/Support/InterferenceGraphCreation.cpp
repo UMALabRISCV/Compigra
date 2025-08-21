@@ -222,13 +222,85 @@ createInterferenceGraph(std::map<int, std::vector<mlir::Operation *>> &opList,
     bool changed = false;
     for (auto it = ctrlFlow.rbegin(); it != ctrlFlow.rend(); ++it) {
       auto time = it->first;
-      auto nextTime = it->second;
+      auto succTime = it->second;
+
+      // get all the liveout values of the successor of ops
+      for (auto sucTimeIt : succTime) {
+        if (liveIn.find(sucTimeIt) == liveIn.end())
+          continue;
+        for (auto live : liveIn[sucTimeIt]) {
+          if (liveOut[time].find(live) == liveOut[time].end()) {
+            changed = true;
+            liveOut[time].insert(live);
+          }
+        }
+      }
+      // Calculate liveIn
+      int opInd = -1;
       auto ops = opList[time];
+
+      std::unordered_set<int> newLiveIn;
+      DenseSet<Value> producedVals;
+      DenseSet<int> producedValIndexes;
+
+      for (auto op : ops) {
+        if (op->getNumResults() == 0)
+          opInd = getOperationIndex(op, defMap);
+        else {
+          opInd = getValueIndex(op->getResult(0), defMap);
+          producedVals.insert(op->getResult(0));
+          producedValIndexes.insert(opInd);
+        }
+        newLiveIn.insert(use[opInd].begin(), use[opInd].end());
+      }
+
+      for (auto v : liveOut[time]) {
+        // if opInd defines v, skip
+        if (isa<BlockArgument>(defMap[v].second)) {
+          SetVector<mlir::Value> relatedVals;
+          getAllPhiRelatedValues(defMap[v].second, relatedVals);
+          if (std::any_of(relatedVals.begin(), relatedVals.end(),
+                          [&](Value v) { return producedVals.contains(v); }))
+            continue;
+        }
+        if (producedValIndexes.find(v) == producedValIndexes.end())
+          newLiveIn.insert(v);
+      }
+
+      // check whether liveIn is changed
+      if (!equalValueSet(newLiveIn, liveIn[time])) {
+        changed = true;
+        liveIn[time] = newLiveIn;
+      }
     }
 
     if (!changed)
       break;
   }
+
+  // create interference graph with defOp and liveOut
+  for (auto it = opList.rbegin(); it != opList.rend(); ++it) {
+    auto time = it->first;
+    auto ops = it->second;
+    for (auto op : ops) {
+      if (op->getNumResults() == 0) {
+        // its livein should be interfered with each other
+        for (auto it1 = liveIn[time].begin(); it1 != liveIn[time].end(); ++it1)
+          for (auto it2 = std::next(it1); it2 != liveIn[time].end(); ++it2)
+            graph.addEdge(*it1, *it2);
+        continue;
+      }
+
+      int opInd = getValueIndex(op->getResult(0), defMap);
+      for (auto v : liveOut[time]) {
+        if (v == opInd)
+          continue;
+        graph.addEdge(opInd, v);
+      }
+    }
+  }
+  return graph;
+  // print the interference graph
 }
 
 InterferenceGraph<int>

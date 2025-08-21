@@ -202,19 +202,19 @@ lexBFS(const std::map<int, std::unordered_set<int>> &adjList) {
 }
 
 /// Allocate physical register based on the interference vertices
-static char allocatePhysicalRegOnIG(std::unordered_set<int> interfNodes,
-                                    std::map<int, char> colorMap,
-                                    std::unordered_set<int> usedColors,
-                                    unsigned maxReg) {
+static int allocatePhysicalRegOnIG(std::unordered_set<int> interfNodes,
+                                   std::map<int, int> colorMap,
+                                   std::unordered_set<int> usedColors,
+                                   unsigned maxReg, unsigned locPE = 0) {
   // std::unordered_set<int> usedColors;
   // for (auto u : interfNodes) {
   //   if (colorMap.find(u) != colorMap.end())
   //     usedColors.insert(colorMap[u]);
   // }
-  char color = 0;
+  int color = (locPE + 1) << 4;
   while (usedColors.find(color) != usedColors.end()) {
     color++;
-    if (color >= maxReg) {
+    if ((color & 0x0F) >= maxReg) {
       return maxReg;
     }
   }
@@ -258,7 +258,7 @@ void getLimitationUseWithPhiNode(
         usedColors.insert(graph.colorMap[u]);
     }
 
-    char color;
+    int color;
     std::unordered_set<int> defNodes;
     bool isPreColored = false;
     for (auto defOp : defOps) {
@@ -288,13 +288,11 @@ void getLimitationUseWithPhiNode(
                                       usedColors, maxReg);
     // limit the coloring selection of the phi node
     // rewrite all value in limitedUse
-    for (auto v : defNodes) {
+    for (auto v : defNodes)
       graph.colorMap[v] = color;
-      // limitedUse[v] = color;
-    }
+
     graph.colorMap[node] = color;
   }
-  // return limitedUse;
 }
 
 LogicalResult compigra::allocateOutRegInPE(
@@ -371,8 +369,8 @@ LogicalResult compigra::allocateOutRegInPE(
         usedColors.insert(graph.colorMap[u]);
     }
 
-    char color = allocatePhysicalRegOnIG(graph.adjList[v], graph.colorMap,
-                                         usedColors, maxReg);
+    int color = allocatePhysicalRegOnIG(graph.adjList[v], graph.colorMap,
+                                        usedColors, maxReg);
     if (color >= maxReg) {
       LLVM_DEBUG(llvm::dbgs() << "FAILED ALLOCATE REGISTER for " << v << "\n");
       return failure();
@@ -427,24 +425,138 @@ std::map<int, std::unordered_set<int>> OpenEdgeASMGen::getPcCtrlFlow() {
   return pcCtrlFlow;
 }
 
-LogicalResult OpenEdgeASMGen::allocateRegisterInRF(
-    std::map<Operation *, Instruction> restriction) {
+void limitPhiNodeRegister(
+    const std::vector<int> phiNodes,
+    const std::map<int, std::pair<Operation *, Value>> opMap,
+    compigra::InterferenceGraph<int> &graph, unsigned maxReg,
+    std::map<Operation *, ScheduleUnit> solution) {
+  for (int node : phiNodes) {
+    if (graph.colorMap.find(node) != graph.colorMap.end())
+      continue;
+    auto prodPE = -1;
+
+    // phi node should be block argument of the basic block
+    auto arg = opMap.at(node).second.cast<BlockArgument>();
+    auto defOps = getCntDefOpIndirectly(arg);
+
+    // allocate register for the phi node
+    std::unordered_set<int> usedColors;
+    for (auto u : graph.adjList.at(node)) {
+      if (graph.colorMap.find(u) != graph.colorMap.end())
+        usedColors.insert(graph.colorMap.at(u));
+    }
+
+    int color;
+    std::unordered_set<int> defNodes;
+    bool isPreColored = false;
+    for (auto defOp : defOps) {
+      prodPE = solution.at(defOp).pe;
+      // find the corresponding value in the graph
+      int defNode = getValueIndex(defOp->getResult(0), opMap);
+      // limitedUse[defNode] = {};
+      defNodes.insert(defNode);
+
+      // check whether the node is pre-colored, if yes then the color should be
+      // the same
+      if (graph.colorMap.find(defNode) != graph.colorMap.end()) {
+        color = graph.colorMap[defNode];
+        isPreColored = true;
+        break;
+      }
+
+      // limit used colors for the defOp
+      for (auto u : graph.adjList.at(defNode)) {
+        if (graph.colorMap.find(u) != graph.colorMap.end())
+          usedColors.insert(graph.colorMap[u]);
+      }
+    }
+
+    // allocate the register for the phi node
+    if (!isPreColored) {
+      color = allocatePhysicalRegOnIG(graph.adjList.at(node), graph.colorMap,
+                                      usedColors, maxReg, prodPE);
+    }
+    // limit the coloring selection of the phi node
+    // rewrite all value in limitedUse
+    // add the PE encoding to the color
+    for (auto v : defNodes) {
+      graph.colorMap[v] = color;
+    }
+    graph.colorMap[node] = color;
+  }
+}
+
+LogicalResult OpenEdgeASMGen::allocateRegisterRFAccess() {
   // First write restriction to the solution
-  for (auto [op, inst] : restriction) {
-    instSolution[op] = inst;
+  std::map<int, std::vector<mlir::Operation *>> opList;
+  for (auto [op, inst] : solution) {
+    opList[inst.time].push_back(op);
   }
 
   auto pcCtrlFlow = getPcCtrlFlow();
+  std::map<int, std::pair<Operation *, Value>> defOpMap;
+  auto graph = createInterferenceGraph(opList, defOpMap, pcCtrlFlow);
+
+  // allocate register using graph coloring
+  auto peo = lexBFS(graph.adjList);
+  if (peo.empty())
+    return success();
+
+  std::vector<int> phiList;
+  for (auto v : peo) {
+    Value val = defOpMap[v].second;
+    // first mark phi node as limited use
+    if (isa<BlockArgument>(val)) {
+      phiList.push_back(v);
+      continue;
+    }
+  }
+
+  // Color the vertices in the order of PEO
+  for (auto v : peo) {
+    // update all phi nodes register assignment
+    limitPhiNodeRegister(phiList, defOpMap, graph, maxReg, solution);
+    Value val = defOpMap[v].second;
+    auto defOp = val.getDefiningOp();
+    if (!defOp)
+      continue;
+
+    if (graph.colorMap.find(v) != graph.colorMap.end()) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << v << ": " << *defOp << " <- ASSIGNED "
+                 << std::to_string(graph.colorMap[v] & 0x0F) << "\n");
+      solution[defOp].reg = graph.colorMap[v] & 0x0F;
+      continue;
+    }
+
+    // if v corresponds to a phi node, it should be limited to the same
+    // register with its source.
+
+    std::unordered_set<int> usedColors;
+    // allocate register using the interference graph
+    for (auto u : graph.adjList[v]) {
+      if (graph.colorMap.find(u) != graph.colorMap.end())
+        usedColors.insert(graph.colorMap[u]);
+    }
+
+    int color =
+        allocatePhysicalRegOnIG(graph.adjList[v], graph.colorMap, usedColors,
+                                maxReg, solution.at(defOp).pe);
+    if ((color & 0x0F) >= maxReg) {
+      LLVM_DEBUG(llvm::dbgs() << "FAILED ALLOCATE REGISTER for " << v << "\n");
+      return failure();
+    }
+    // get PE of this operation
+    auto pe = solution.at(defOp).pe;
+    graph.colorMap[v] = color;
+    LLVM_DEBUG(llvm::dbgs() << v << ": ALLOCATE R" << (color & 0x0F) << " To "
+                            << val << "\n");
+    solution[defOp].reg = color & 0x0F;
+  }
+  return success();
 }
 
-LogicalResult OpenEdgeASMGen::allocateRegisters(
-    std::map<Operation *, Instruction> restriction) {
-
-  // First write restriction to the solution
-  for (auto [op, inst] : restriction) {
-    instSolution[op] = inst;
-    solution[op].reg = inst.Rout;
-  }
+LogicalResult OpenEdgeASMGen::allocateRegisterRoutAccess() {
 
   auto pcCtrlFlow = getPcCtrlFlow();
 
@@ -528,6 +640,26 @@ LogicalResult OpenEdgeASMGen::allocateRegisters(
       return failure();
     }
   }
+}
+
+LogicalResult OpenEdgeASMGen::allocateRegisters(
+    std::map<Operation *, Instruction> restriction) {
+
+  if (rfAccessModel == RFAccessModel::RF_READ) {
+    // PEs have fully read access to neighourbing's RF
+    if (failed(allocateRegisterRFAccess()))
+      return failure();
+  } else if (rfAccessModel == RFAccessModel::Rout_READ) {
+    // PEs have only read access to neighourbing's Rout
+    // First write restriction to the solution
+    for (auto [op, inst] : restriction) {
+      instSolution[op] = inst;
+      solution[op].reg = inst.Rout;
+    }
+
+    if (failed(allocateRegisterRoutAccess()))
+      return failure();
+  }
 
   for (auto [op, sol] : solution) {
     if (op->getNumResults() > 0 && sol.reg == -1) {
@@ -541,7 +673,8 @@ LogicalResult OpenEdgeASMGen::allocateRegisters(
   }
 
   // write register allocation results to instructions
-  if (failed(convertToInstructionMap())) {
+  if (failed(
+          convertToInstructionMap(rfAccessModel == RFAccessModel::RF_READ))) {
     LLVM_DEBUG(llvm::dbgs() << "Failed to convert to instruction map\n");
     return failure();
   }
@@ -652,7 +785,7 @@ static std::string getConstantString(Operation *op) {
   return "Unknown";
 }
 
-LogicalResult OpenEdgeASMGen::convertToInstructionMap() {
+LogicalResult OpenEdgeASMGen::convertToInstructionMap(bool rfAccess) {
   for (auto [op, unit] : solution) {
     if (isa<LLVM::BrOp, cf::BranchOp>(op)) {
       continue;
@@ -679,11 +812,15 @@ LogicalResult OpenEdgeASMGen::convertToInstructionMap() {
           isa<arith::ConstantOp>(producerA) ||
           isa<arith::ConstantFloatOp>(producerA))
         inst.opA = getConstantString(producerA);
-      else if (solution.find(producerA) != solution.end())
+      else if (solution.find(producerA) != solution.end()) {
         inst.opA =
             getOperandSrcReg(unit.pe, solution[producerA].pe,
                              solution[producerA].reg, nRow, nCol, maxReg);
-      else {
+        if (rfAccess && inst.opA.substr(0, 2) == "RC") {
+          inst.opA = "R" + std::to_string(solution[producerA].reg) +
+                     inst.opA.substr(2);
+        }
+      } else {
         LLVM_DEBUG(llvm::dbgs()
                    << "Failed to find operand 0 for " << *op << "\n");
         return failure();
@@ -696,11 +833,15 @@ LogicalResult OpenEdgeASMGen::convertToInstructionMap() {
           isa<arith::ConstantOp>(producerB) ||
           isa<arith::ConstantFloatOp>(producerB))
         inst.opB = getConstantString(producerB);
-      else if (solution.find(producerB) != solution.end())
+      else if (solution.find(producerB) != solution.end()) {
         inst.opB =
             getOperandSrcReg(unit.pe, solution[producerB].pe,
                              solution[producerB].reg, nRow, nCol, maxReg);
-      else {
+        if (rfAccess && inst.opB.substr(0, 2) == "RC") {
+          inst.opB = "R" + std::to_string(solution[producerB].reg) +
+                     inst.opB.substr(2);
+        }
+      } else {
         LLVM_DEBUG(llvm::dbgs()
                    << "Failed to find operand 1 for " << *op << "\n");
         return failure();

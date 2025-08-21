@@ -176,7 +176,7 @@ struct ASMGenTemporalCGRAPass
     Region &region = funcOp.getBody();
     OpBuilder builder(funcOp);
 
-    unsigned maxReg = 3;
+    unsigned maxReg = 4;
     TemporalCGRAScheduler scheduler(region, maxReg, nRow, nCol, builder);
     scheduler.setReserveMem(mem);
 
@@ -204,6 +204,7 @@ struct ASMGenTemporalCGRAPass
     // scheduler.readScheduleResult("temporalSpatialSchedule.csv");
     OpenEdgeASMGen asmGen(region, maxReg, nRow);
     asmGen.setSolution(scheduler.getSolution());
+    asmGen.setRFAccessModel(RFAccessModel::RF_READ);
     if (failed(asmGen.allocateRegisters(scheduler.knownRes))) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();
