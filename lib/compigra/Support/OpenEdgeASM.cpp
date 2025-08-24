@@ -205,7 +205,7 @@ lexBFS(const std::map<int, std::unordered_set<int>> &adjList) {
 static int allocatePhysicalRegOnIG(std::unordered_set<int> interfNodes,
                                    std::map<int, int> colorMap,
                                    std::unordered_set<int> usedColors,
-                                   unsigned maxReg, unsigned locPE = 0) {
+                                   unsigned maxReg, unsigned locPE = -1) {
   // std::unordered_set<int> usedColors;
   // for (auto u : interfNodes) {
   //   if (colorMap.find(u) != colorMap.end())
@@ -372,7 +372,9 @@ LogicalResult compigra::allocateOutRegInPE(
     int color = allocatePhysicalRegOnIG(graph.adjList[v], graph.colorMap,
                                         usedColors, maxReg);
     if (color >= maxReg) {
-      LLVM_DEBUG(llvm::dbgs() << "FAILED ALLOCATE REGISTER for " << v << "\n");
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Rout_Access Mode: FAILED ALLOCATE REGISTER for " << v
+                 << "\n");
       return failure();
     }
     graph.colorMap[v] = color;
@@ -637,9 +639,12 @@ LogicalResult OpenEdgeASMGen::allocateRegisterRoutAccess() {
     }
     // allocate register for the operations in the PE
     if (failed(allocateOutRegInPE(ops, solution, maxReg, pcCtrlFlow))) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Failed to allocate register for PE " << pe << "\n");
       return failure();
     }
   }
+  return success();
 }
 
 LogicalResult OpenEdgeASMGen::allocateRegisters(

@@ -897,7 +897,7 @@ struct FastASMGenTemporalCGRAPass
       printLiveGraph(bbFiniGraphs);
 
       // Init operation assginer
-      BasicBlockOpAssignment bbOpAssignment(&bb, 4, nRow, nCol, builder);
+      BasicBlockOpAssignment bbOpAssignment(&bb, maxReg, nRow, nCol, builder);
       auto zeroIntOp = getZeroConstant(region, builder);
       auto zeroFloatOp = getZeroConstant(region, builder, true);
       bbOpAssignment.setUpZeroOp(zeroIntOp, zeroFloatOp);
