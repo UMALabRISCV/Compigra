@@ -27,8 +27,8 @@ namespace compigra {
 #include "compigra/Conversion/Passes.h.inc"
 
 void populateCfToCgraConversionPatterns(
-    RewritePatternSet &patterns, SmallVector<Operation *> &baseAddrs,
-    std::map<llvm::StringRef, Operation *> &globalConstAddrs,
+    RewritePatternSet &patterns, DenseMap<int, Operation *> &baseAddrs,
+    DenseMap<llvm::StringRef, Operation *> &globalConstAddrs,
     DenseMap<Operation *, SmallVector<Operation *>> &strideValMap);
 
 std::unique_ptr<mlir::Pass> createCfToCgraConversion();

@@ -415,7 +415,7 @@ static int preComputeOffset(Operation *offSetOp, Operation *byteOp) {
 // Rewrite memref.get_global to constant operation
 struct MemRefGetGlobalOpConversion : OpConversionPattern<memref::GetGlobalOp> {
   MemRefGetGlobalOpConversion(MLIRContext *ctx,
-                              std::map<llvm::StringRef, Operation *> baseAddrs)
+                              DenseMap<llvm::StringRef, Operation *> baseAddrs)
       : OpConversionPattern<memref::GetGlobalOp>(ctx), baseAddrs(baseAddrs) {}
 
   LogicalResult
@@ -426,15 +426,15 @@ struct MemRefGetGlobalOpConversion : OpConversionPattern<memref::GetGlobalOp> {
     return success();
   }
 
-  std::map<llvm::StringRef, Operation *> baseAddrs;
+  DenseMap<llvm::StringRef, Operation *> baseAddrs;
 };
 
 /// Lower memref.load/ memref.store to cgra.lwi/cgra.swi
 template <typename MemRefOp>
 struct MemRefRWOpConversion : OpConversionPattern<MemRefOp> {
   MemRefRWOpConversion(
-      MLIRContext *ctx, SmallVector<Operation *> &baseAddrs,
-      std::map<llvm::StringRef, Operation *> &globalConstAddrs,
+      MLIRContext *ctx, DenseMap<int, Operation *> &baseAddrs,
+      DenseMap<llvm::StringRef, Operation *> &globalConstAddrs,
       DenseMap<Operation *, SmallVector<Operation *>> &strideValMap)
       : OpConversionPattern<MemRefOp>(ctx), baseAddrs(baseAddrs),
         globalConstAddrs(globalConstAddrs), strideValMap(strideValMap) {}
@@ -442,7 +442,7 @@ struct MemRefRWOpConversion : OpConversionPattern<MemRefOp> {
   LogicalResult
   matchAndRewrite(MemRefOp op, typename MemRefOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Operation *byteOp = baseAddrs.back();
+    Operation *byteOp = baseAddrs.at(-1);
     Location loc = op.getLoc();
 
     // compute the base address of op
@@ -450,7 +450,7 @@ struct MemRefRWOpConversion : OpConversionPattern<MemRefOp> {
     Operation *baseOp;
     if (auto arg = dyn_cast_or_null<BlockArgument>(ref)) {
       unsigned argIndex = arg.getArgNumber();
-      baseOp = baseAddrs[argIndex];
+      baseOp = baseAddrs.at(argIndex);
     } else if (isa<memref::GetGlobalOp>(ref.getDefiningOp())) {
       auto getOp = dyn_cast<memref::GetGlobalOp>(ref.getDefiningOp());
       baseOp = globalConstAddrs.at(getOp.getName());
@@ -492,8 +492,8 @@ struct MemRefRWOpConversion : OpConversionPattern<MemRefOp> {
     return success();
   }
 
-  SmallVector<Operation *> baseAddrs;
-  std::map<llvm::StringRef, Operation *> globalConstAddrs;
+  DenseMap<int, Operation *> baseAddrs;
+  DenseMap<llvm::StringRef, Operation *> globalConstAddrs;
   DenseMap<Operation *, SmallVector<Operation *>> strideValMap;
 };
 
@@ -522,16 +522,14 @@ assignMemoryToArg(mlir::Type typeAttr, unsigned &lastPtr,
 }
 
 LogicalResult
-allocateMemory(ModuleOp &modOp, SmallVector<Operation *> &constAddr,
-               std::map<llvm::StringRef, Operation *> &globalConstAddrs,
+allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
+               DenseMap<llvm::StringRef, Operation *> &globalConstAddrs,
                DenseMap<Operation *, SmallVector<Operation *>> &offValMap,
                OpBuilder &builder, Pass::ListOption<int> &startAddr) {
   if (modOp.getOps<func::FuncOp>().empty())
     return success();
 
   auto funcOp = *modOp.getOps<func::FuncOp>().begin();
-  std::vector<int> memAlloc;
-  std::vector<std::vector<int>> memRefDims;
 
   unsigned lastPtr = 0;
   if (!startAddr.empty()) {
@@ -540,100 +538,94 @@ allocateMemory(ModuleOp &modOp, SmallVector<Operation *> &constAddr,
 
   // assign memory for function arguments
   unsigned directLoadArgNum = 0;
+  builder.setInsertionPointToStart(&funcOp.getBlocks().front());
   for (auto [ind, arg] : llvm::enumerate(funcOp.getArguments())) {
     if (!arg.getType().isa<MemRefType>() &&
         arg.getType() != builder.getI32Type())
       return failure();
 
-    memRefDims.push_back(std::vector<int>());
     if (arg.getType() == builder.getI32Type()) {
       directLoadArgNum++;
       // insert lwd operation for the integer argument
-      builder.setInsertionPointToStart(&funcOp.getBlocks().front());
       auto lwdOp =
           builder.create<cgra::LwdOp>(funcOp.getLoc(), builder.getI32Type());
       lwdOp->setAttr("Value",
                      builder.getStringAttr("arg" + std::to_string(ind)));
-      constAddr.push_back(lwdOp);
+      constAddr[ind] = lwdOp;
       // replace the argument with the lwd operation result
       arg.replaceAllUsesWith(lwdOp.getResult());
       continue;
     }
 
     auto memrefType = arg.getType().cast<MemRefType>();
-
-    if (memrefType.getDimSize(0) > 0) {
-      // Allocate memory based on the default size
-      memAlloc.push_back(lastPtr);
-      int memRefSize = 1;
-      for (int i = memrefType.getRank() - 1; i >= 0; i--) {
-        memRefSize *= memrefType.getDimSize(i);
-        memRefDims[ind].insert(memRefDims[ind].begin(), memRefSize);
-      }
-      lastPtr += memRefSize * 4;
-    } else {
-      // Fail if the size is not specified
+    if (memrefType.getDimSize(0) <= 0)
       return failure();
-    }
-  }
 
-  auto allocateMemArgNum = memAlloc.size();
-  llvm::errs() << allocateMemArgNum << "\n";
+    // allocate memory for array argument
+    Operation *baseOp = nullptr;
+    if (startAddr.empty()) {
+      baseOp =
+          builder.create<cgra::LwdOp>(funcOp.getLoc(), builder.getI32Type());
+    } else {
+      baseOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), lastPtr,
+                                                    builder.getI32Type());
+    }
+    constAddr[ind] = baseOp;
+    baseOp->setAttr("BaseAddr",
+                    builder.getStringAttr("arg" + std::to_string(ind)));
+    SmallVector<Operation *> dimOps;
+    int memRefSize = 1;
+    for (int i = 0; i < memrefType.getRank(); i++) {
+      auto curDim = memrefType.getDimSize(i);
+      memRefSize *= curDim;
+      auto dimOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), curDim,
+                                                        builder.getI32Type());
+      dimOp->setAttr("arg", builder.getIntegerAttr(builder.getI32Type(), ind));
+      dimOp->setAttr("DimProd",
+                     builder.getIntegerAttr(builder.getI32Type(), i));
+      dimOps.push_back(dimOp);
+    }
+    offValMap[baseOp] = dimOps;
+    lastPtr += memRefSize * 4;
+  }
+  // create a constant operation to initialize the offset
+  auto offset = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), 4,
+                                                     builder.getI32Type());
+  constAddr[-1] = offset;
+
+  std::vector<int> memAlloc;
+  std::vector<std::vector<int>> memRefDims;
   std::map<int, memref::GlobalOp> globalArgs;
   // assign memory for global arguments
   for (auto [ind, arg] : llvm::enumerate(modOp.getOps<memref::GlobalOp>())) {
     globalArgs[ind] = arg;
     assignMemoryToArg(arg.getType(), lastPtr, memAlloc, memRefDims);
   }
-
-  // insert constant operation to initialize the offset and base address
-  builder.setInsertionPointToStart(&funcOp.getBlocks().front());
-  // print the memory allocation
   for (unsigned i = 0; i < memAlloc.size(); i++) {
-    Operation *baseOp = nullptr;
-    if (startAddr.empty()) {
-      baseOp =
-          builder.create<cgra::LwdOp>(funcOp.getLoc(), builder.getI32Type());
-    } else {
-      baseOp = builder.create<arith::ConstantIntOp>(
-          funcOp.getLoc(), memAlloc[i], builder.getI32Type());
-    }
-    std::string prefix = i < allocateMemArgNum ? "arg" : "global";
-    unsigned argInd =
-        i < allocateMemArgNum ? i + directLoadArgNum : i - allocateMemArgNum;
-
+    Operation *baseOp = builder.create<arith::ConstantIntOp>(
+        funcOp.getLoc(), memAlloc[i], builder.getI32Type());
     baseOp->setAttr("BaseAddr",
-                    builder.getStringAttr(prefix + std::to_string(argInd)));
+                    builder.getStringAttr("global" + std::to_string(i)));
 
     SmallVector<Operation *> dimOps;
     for (unsigned j = 1; j < memRefDims[i].size(); j++) {
       auto dimOp = builder.create<arith::ConstantIntOp>(
           funcOp.getLoc(), memRefDims[i][j], builder.getI32Type());
-      dimOp->setAttr(prefix,
-                     builder.getIntegerAttr(builder.getI32Type(), argInd));
+      dimOp->setAttr("global", builder.getIntegerAttr(builder.getI32Type(), i));
       dimOp->setAttr("DimProd",
                      builder.getIntegerAttr(builder.getI32Type(), j));
       dimOps.push_back(dimOp);
     }
     offValMap[baseOp] = dimOps;
-    if (i >= allocateMemArgNum) {
-      globalConstAddrs[globalArgs[i - allocateMemArgNum].getName()] = baseOp;
-    } else {
-      constAddr.push_back(baseOp);
-    }
+    globalConstAddrs[globalArgs[i].getName()] = baseOp;
   }
-
-  // create a constant operation to initialize the offset
-  auto offset = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), 4,
-                                                     builder.getI32Type());
-  constAddr.push_back(offset);
 
   return success();
 }
 
 void compigra::populateCfToCgraConversionPatterns(
-    RewritePatternSet &patterns, SmallVector<Operation *> &constAddr,
-    std::map<llvm::StringRef, Operation *> &globalConstAddrs,
+    RewritePatternSet &patterns, DenseMap<int, Operation *> &constAddr,
+    DenseMap<llvm::StringRef, Operation *> &globalConstAddrs,
     DenseMap<Operation *, SmallVector<Operation *>> &offValMap) {
   patterns.add<CfCondBrOpConversion>(patterns.getContext());
   patterns.add<ArithCmpIOpConversion>(patterns.getContext());
@@ -771,8 +763,8 @@ static void transformkernelBLAS(func::FuncOp funcOp, OpBuilder &builder) {
 void CfToCgraConversionPass::runOnOperation() {
   ModuleOp modOp = dyn_cast<ModuleOp>(getOperation());
   OpBuilder builder(modOp);
-  std::map<llvm::StringRef, Operation *> globalConstAddrs;
-  SmallVector<Operation *> constAddrs;
+  DenseMap<llvm::StringRef, Operation *> globalConstAddrs;
+  DenseMap<int, Operation *> constAddrs;
 
   // Map to store the stride information for each memory reference, where
   // the key is the constant value of the base address.
@@ -807,14 +799,15 @@ void CfToCgraConversionPass::runOnOperation() {
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))
     signalPassFailure();
+  llvm::errs() << "Conversion done\n";
 
   // raise the constant operation to the top level
   auto funcOps = modOp.getOps<func::FuncOp>();
-  if (!funcOps.empty()) {
-    auto funcOp = *funcOps.begin();
-    if (failed(removeUnusedOps(funcOp)) || failed(raiseConstOpToTop(funcOp)))
-      signalPassFailure();
-  }
+  // if (!funcOps.empty()) {
+  //   auto funcOp = *funcOps.begin();
+  //   if (failed(removeUnusedOps(funcOp)) || failed(raiseConstOpToTop(funcOp)))
+  //     signalPassFailure();
+  // }
 }
 
 namespace compigra {
