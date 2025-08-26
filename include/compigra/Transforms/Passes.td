@@ -18,10 +18,16 @@ include "mlir/Pass/PassBase.td"
 // Affine passes
 //===----------------------------------------------------------------------===//
 
+def AffineScalarizeStore : Pass<"scalarize-store"> {
+  let summary = "Scalarize the store operations";
+  let constructor = "compigra::createAffineScalarizeStore()";
+  let dependentDialects = ["affine::AffineDialect"];
+}
+
 def AffineMaximizeGemm : Pass<"affine-maximize-gemm"> {
   let summary = "Maximize the gemm size";
   let constructor = "compigra::createAffineMaximizeGemm()";
-  let dependentDialects = ["cgra::CgraDialect"];
+  let dependentDialects = ["cgra::CgraDialect, affine::AffineDialect"];
 }
 
 //===----------------------------------------------------------------------===//

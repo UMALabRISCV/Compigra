@@ -1,5 +1,6 @@
 add_compigra_library(MLIRCompigraTransforms
 AffineExploitGemm.cpp
+AffineScalarizeRecurrentStore.cpp
 CfFixIndexWidth.cpp
 CfMergeIfToSelect.cpp
 CfFuseLoopHeadBody.cpp

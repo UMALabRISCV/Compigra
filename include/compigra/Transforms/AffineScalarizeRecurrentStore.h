@@ -10,8 +10,8 @@
 // kernels through loop transformations.
 //
 //===----------------------------------------------------------------------===//
-#ifndef COMPIGRA_AFFINEEXPLOITGEMM_H
-#define COMPIGRA_AFFINEEXPLOITGEMM_H
+#ifndef COMPIGRA_AFFINE_SCALARIZE_RECURRENTSTORE_H
+#define COMPIGRA_AFFINE_SCALARIZE_RECURRENTSTORE_H
 
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
@@ -21,21 +21,12 @@
 using namespace mlir;
 namespace compigra {
 
-struct GemmVar {
-  Value innerBound;
-  Value middleBound;
-  Value outerBound;
-  Value memRef1;
-  Value memRef2;
-  Value memRefRes;
-};
-
-#define GEN_PASS_DEF_AFFINEMAXIMIZEGEMM
-#define GEN_PASS_DECL_AFFINEMAXIMIZEGEMM
+#define GEN_PASS_DEF_AFFINESCALARIZESTORE
+#define GEN_PASS_DECL_AFFINESCALARIZESTORE
 #include "compigra/Transforms/Passes.h.inc"
 
-std::unique_ptr<mlir::Pass> createAffineMaximizeGemm();
+std::unique_ptr<mlir::Pass> createAffineScalarizeStore();
 
 } // namespace compigra
 
-#endif // COMPIGRA_AFFINEEXPLOITGEMM_H
+#endif // COMPIGRA_AFFINE_SCALARIZE_RECURRENTSTORE_H
