@@ -26,31 +26,6 @@
 
 using namespace mlir;
 
-/// Check whether a constant operation is used as Imm field for an memory
-/// address.
-bool isAddrConstOp(arith::ConstantOp constOp);
-
-/// Move all constant operations to the entry block
-template <typename FuncOp> LogicalResult raiseConstOperation(FuncOp funcOp);
-
-/// Erase constant operations if they are not in used
-template <typename FuncOp> LogicalResult removeUnusedConstOp(FuncOp funcOp);
-
-/// Erase bitwidth related operations if they have been rewritten and have equal
-/// bitwidths for input and output.
-LogicalResult removeEqualWidthBWOp(cgra::FuncOp funcOp);
-
-/// Use add operation to generate a value if Imm field is not allowed.
-arith::AddIOp generateImmAddOp(arith::ConstantOp constOp, Operation *user,
-                               PatternRewriter &rewriter);
-
-/// Rewrite constant operations can not fit into Imm field
-Operation *generateValidConstant(arith::ConstantOp constOp,
-                                 PatternRewriter &rewriter);
-
-/// OpenEdge address Imm field
-bool isValidImmAddr(arith::ConstantOp constOp);
-
 namespace {
 // Initialze the IR target that can not be deployed in the openedge
 // CGRA

@@ -1011,6 +1011,11 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
   int timeShift = 0;
   for (int t = startT; t <= endTime; t++) {
     auto ops = getOperationsAtTime(t);
+    if (ops.count(0) && isa<cgra::BlasGemmOp>(ops.at(0))) {
+      // In the next 27 time steps, there will be BLAS kernel execution
+      t += blasLatency;
+      continue;
+    }
     for (auto [_, op] : ops) {
       ScheduleUnit &unit = solution[op];
       unit.time -= timeShift;

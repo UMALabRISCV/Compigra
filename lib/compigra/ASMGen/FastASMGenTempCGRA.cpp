@@ -388,7 +388,7 @@ void updateGlobalValPlacement(
 void calculateTemporalSpatialSchedule(
     Region &region,
     std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
-    const std::string fileName) {
+    const std::string fileName, int blasKernelLatency = 27) {
   unsigned kernelTime = 0;
   for (auto &block : region.getBlocks()) {
     int alignStartTime = kernelTime;
@@ -398,7 +398,7 @@ void calculateTemporalSpatialSchedule(
     Operation *blasKernel = &block.getOperations().front();
     if (isa<cgra::BlasGemmOp>(blasKernel)) {
       solution[blasKernel] = {(int)kernelTime, 0};
-      kernelTime += 27;
+      kernelTime += blasKernelLatency;
       continue;
     }
 
@@ -986,11 +986,13 @@ struct FastASMGenTemporalCGRAPass
     }
 
     // organize the rawSolution to a final solution
-    calculateTemporalSpatialSchedule(region, rawSolution,
-                                     "space_temporal_assignment.csv");
+    int latencyBLAS = 27;
+    calculateTemporalSpatialSchedule(
+        region, rawSolution, "space_temporal_assignment.csv", latencyBLAS);
     // perform register allocation
     OpenEdgeASMGen asmGen(region, maxReg, nRow);
     asmGen.setSolution(rawSolution);
+    asmGen.setLatencyBLAS(latencyBLAS);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();

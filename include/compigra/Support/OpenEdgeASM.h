@@ -112,6 +112,8 @@ public:
   // The start PC of the kernel
   int startPC = 0;
 
+  void setLatencyBLAS(int latency) { blasLatency = latency; }
+
   // set the start PC of the kernel
   void initBaseTime(int time) {
     startPC = time;
@@ -129,6 +131,7 @@ private:
   unsigned nRow, nCol;
   RFAccessModel rfAccessModel = RFAccessModel::Rout_READ;
   SmallVector<Operation *> dropJumpOps;
+  int blasLatency = 27; // default latency of BLAS kernel
 
   // The shedule result might not start from 0, the baseTime is the additional
   // time step to ensure the schedule kernel starts from startPC;
