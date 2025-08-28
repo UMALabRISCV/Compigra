@@ -653,7 +653,7 @@ static void getBLASArguments(cgra::BlasGemmOp op,
       continue;
     }
 
-    if (memrefType.getRank() != 1 ||
+    if (memrefType.getRank() != 2 ||
         !memrefType.getElementType().isInteger(32)) {
       newOperands.push_back(operand);
       continue;

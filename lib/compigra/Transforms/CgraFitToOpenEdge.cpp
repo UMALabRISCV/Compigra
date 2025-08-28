@@ -16,6 +16,7 @@
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraInterfaces.h"
 #include "compigra/CgraOps.h"
+#include "compigra/Scheduler/BasicBlockOpAssignment.h"
 #include "compigra/Transforms/SatMapItDATE2023InputGen/PrintSatMapItDAG.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -198,13 +199,25 @@ bool isValidImmAddr(arith::ConstantOp constOp) {
   return value <= maxAddr;
 };
 
-Operation *existsConstant(int intVal, SmallVector<Operation *> &insertedOps) {
+Operation *existConstantOp(int intVal, SmallVector<Operation *> &insertedOps) {
   for (auto &op : insertedOps) {
     if (!op->getAttrDictionary().contains("constant"))
       continue;
     auto produceVal = op->getAttr("constant").dyn_cast<IntegerAttr>().getInt();
     if (produceVal == intVal) {
       return op;
+    }
+  }
+  return nullptr;
+}
+
+Operation *existConstant(int intVal, SmallVector<Operation *> &insertedOps) {
+  for (auto &op : insertedOps) {
+    if (auto constOp = dyn_cast<arith::ConstantOp>(op)) {
+      auto produceVal = constOp.getValue().cast<IntegerAttr>().getInt();
+      if (produceVal == intVal) {
+        return constOp;
+      }
     }
   }
   return nullptr;
@@ -265,7 +278,8 @@ static bool isLoopBlock(Block *blk) {
 }
 
 Operation *generateValidConstant(arith::ConstantOp constOp,
-                                 PatternRewriter &rewriter) {
+                                 PatternRewriter &rewriter,
+                                 SmallVector<Operation *> &insertedOps) {
   int32_t valAttr =
       (int32_t)constOp->getAttr("value").dyn_cast<IntegerAttr>().getInt();
 
@@ -294,36 +308,63 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
     return nullptr;
 
   int32_t part0 = mask0 & valAttr;
-
-  auto lowerBits = rewriter.create<arith::ConstantOp>(
-      loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(part0));
-  rewriter.updateRootInPlace(constOp, [&] {
-    constOp->setAttr("value", rewriter.getI32IntegerAttr(part0));
-  });
+  arith::ConstantOp lowerBits;
+  if (auto existOp = existConstant(part0, insertedOps)) {
+    lowerBits = dyn_cast<arith::ConstantOp>(existOp);
+  } else {
+    lowerBits = rewriter.create<arith::ConstantOp>(
+        loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(part0));
+    rewriter.updateRootInPlace(constOp, [&] {
+      constOp->setAttr("value", rewriter.getI32IntegerAttr(part0));
+    });
+    insertedOps.push_back(lowerBits);
+  }
 
   int32_t part1 = mask1 & valAttr;
   part1 = part1 >> 12;
-  auto midBitVal = rewriter.create<arith::ConstantOp>(
-      loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(part1));
-  auto zeroOp = rewriter.create<arith::ConstantOp>(
-      loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(0));
-  // Generate midBits through add operation
-  auto midBits =
-      rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
-                                     midBitVal.getResult(), zeroOp.getResult());
+  Operation *midBits;
+  if (auto existOp = existConstantOp(part1, insertedOps)) {
+    midBits = existOp;
+  } else {
+    auto midBitVal = rewriter.create<arith::ConstantOp>(
+        loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(part1));
+    auto zeroOp = rewriter.create<arith::ConstantOp>(
+        loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(0));
+    // Generate midBits through add operation
+    midBits = rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
+                                             midBitVal.getResult(),
+                                             zeroOp.getResult());
+    midBits->setAttr("constant", rewriter.getI32IntegerAttr(part1));
+    insertedOps.push_back(midBits);
+  }
 
-  auto shiftImm1 = rewriter.create<arith::ConstantOp>(
-      loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(12));
-  auto shiftOp1 = rewriter.create<arith::ShLIOp>(
-      loc, constOp.getResult().getType(), midBits.getResult(),
-      shiftImm1.getResult());
-  auto addOp = rewriter.create<arith::AddIOp>(
-      loc, constOp.getResult().getType(), lowerBits.getResult(),
-      shiftOp1.getResult());
+  int shiftVal = part1 << 12;
+  arith::ShLIOp shiftOp1;
+  if (auto existOp = existConstantOp(shiftVal, insertedOps)) {
+    shiftOp1 = dyn_cast<arith::ShLIOp>(existOp);
+  } else {
+    auto shiftImm1 = rewriter.create<arith::ConstantOp>(
+        loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(12));
+    shiftOp1 = rewriter.create<arith::ShLIOp>(
+        loc, constOp.getResult().getType(), midBits->getResult(0),
+        shiftImm1.getResult());
+    shiftOp1->setAttr("constant", rewriter.getI32IntegerAttr(shiftVal));
+    insertedOps.push_back(shiftOp1);
+  }
+  int addVal = part0 + (part1 << 12);
+  arith::AddIOp addOp;
+  if (auto existOp = existConstantOp(addVal, insertedOps)) {
+    addOp = dyn_cast<arith::AddIOp>(existOp);
+  } else {
+    addOp = rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
+                                           lowerBits.getResult(),
+                                           shiftOp1.getResult());
+    addOp->setAttr("constant", rewriter.getI32IntegerAttr(valAttr));
+    insertedOps.push_back(addOp);
+  }
 
   // If the higher bits are zero
   if (!(mask2 & valAttr)) {
-    addOp->setAttr("constant", rewriter.getI32IntegerAttr(valAttr));
     rewriter.replaceUsesWithIf(
         constOp, addOp.getResult(),
         [&](OpOperand &operand) { return operand.getOwner() != addOp; });
@@ -332,19 +373,35 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
 
   int32_t part2 = mask2 & valAttr;
   part2 = part2 >> 24;
-  auto highBitVal = rewriter.create<arith::ConstantOp>(
-      loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(part2));
-  auto zeroOp2 = rewriter.create<arith::ConstantOp>(
-      loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(0));
-  // Generate highBits through add operation
-  auto highBits = rewriter.create<arith::AddIOp>(
-      loc, constOp.getResult().getType(), highBitVal.getResult(),
-      zeroOp2.getResult());
-  auto shiftImm2 = rewriter.create<arith::ConstantOp>(
-      loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(24));
-  auto shiftOp2 = rewriter.create<arith::ShLIOp>(
-      loc, constOp.getResult().getType(), highBits.getResult(),
-      shiftImm2.getResult());
+  Operation *highBits;
+  if (auto existOp = existConstantOp(part2, insertedOps)) {
+    highBits = existOp;
+  } else {
+    auto highBitVal = rewriter.create<arith::ConstantOp>(
+        loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(part2));
+    auto zeroOp2 = rewriter.create<arith::ConstantOp>(
+        loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(0));
+    // Generate highBits through add operation
+    highBits = rewriter.create<arith::AddIOp>(
+        loc, constOp.getResult().getType(), highBitVal.getResult(),
+        zeroOp2.getResult());
+    highBits->setAttr("constant", rewriter.getI32IntegerAttr(part2));
+    insertedOps.push_back(highBits);
+  }
+
+  arith::ShLIOp shiftOp2;
+  int shiftVal2 = part2 << 24;
+  if (auto existOp = existConstantOp(part2, insertedOps)) {
+    shiftOp2 = dyn_cast<arith::ShLIOp>(existOp);
+  } else {
+    auto shiftImm2 = rewriter.create<arith::ConstantOp>(
+        loc, constOp.getResult().getType(), rewriter.getI32IntegerAttr(24));
+    shiftOp2 = rewriter.create<arith::ShLIOp>(
+        loc, constOp.getResult().getType(), highBits->getResult(0),
+        shiftImm2.getResult());
+    shiftOp2->setAttr("constant", rewriter.getI32IntegerAttr(shiftVal2));
+    insertedOps.push_back(shiftOp2);
+  }
   auto sumOp =
       rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
                                      addOp.getResult(), shiftOp2.getResult());
@@ -557,11 +614,11 @@ ConstantOpRewrite::matchAndRewrite(arith::ConstantOp constOp,
   // indirectly load & store cannot exceed reserved address range
   // if the constant is used as immediate for address
   if (isAddrConstOp(constOp) && !isValidImmAddr(constOp)) {
-    if (auto validOp = existsConstant(value, insertedOps)) {
+    if (auto validOp = existConstantOp(value, insertedOps)) {
       // set it to valid range, to be removed later on
       constOp.replaceAllUsesWith(validOp);
     } else {
-      auto addOp = generateValidConstant(constOp, rewriter);
+      auto addOp = generateValidConstant(constOp, rewriter, insertedOps);
       insertedOps.push_back(addOp);
     }
     // set the value to 0, to be removed later on
@@ -573,7 +630,7 @@ ConstantOpRewrite::matchAndRewrite(arith::ConstantOp constOp,
 
   // rewrite the constant operation if the value exceed the range
   if (value < -4097 || value > 4096) {
-    auto addOp = generateValidConstant(constOp, rewriter);
+    auto addOp = generateValidConstant(constOp, rewriter, insertedOps);
     insertedOps.push_back(addOp);
     // set the value to 0, to be removed later on
     rewriter.updateRootInPlace(constOp, [&] {
@@ -663,6 +720,58 @@ LogicalResult LwiOpRewrite::matchAndRewrite(cgra::LwiOp lwiOp,
   return success();
 }
 
+void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
+  // if the block contains the gemm_blas operation, push all its live-in into
+  // memory, and usage of these live-in values should be loaded from memory
+  std::map<Block *, SetVector<Value>> liveIns;
+  std::map<Block *, SetVector<Value>> liveOuts;
+
+  int baseAddr = 0xFE00 + 6 * 4; // the gemm_blas operation uses first 6 words
+
+  computeLiveValue(region, liveIns, liveOuts);
+  for (auto &blk : region.getBlocks()) {
+    bool hasGemmBlas = false;
+    auto &firstOp = blk.getOperations().front();
+    if (isa<cgra::BlasGemmOp>(firstOp))
+      hasGemmBlas = true;
+    if (!hasGemmBlas)
+      continue;
+
+    // push all the live-in values to memory
+    for (auto val : liveIns[&blk]) {
+      // if the value is used by the gemm_blas operation, skip it
+      if (llvm::is_contained(firstOp.getOperands(), val))
+        continue;
+
+      // push the value to memory
+      auto predBlk = blk.getSinglePredecessor();
+      builder.setInsertionPointToEnd(predBlk);
+      auto addrCst = builder.create<arith::ConstantOp>(
+          blk.getTerminator()->getLoc(), builder.getI32Type(),
+          builder.getI32IntegerAttr(baseAddr));
+      baseAddr += 4;
+      builder.create<cgra::SwiOp>(blk.getTerminator()->getLoc(), val,
+                                  addrCst.getResult());
+      // load the value from memory in the block
+      DenseMap<Block *, Operation *> loadOps;
+      for (auto user : llvm::make_early_inc_range(val.getUsers())) {
+        if (user->getBlock() == val.getParentBlock() ||
+            loadOps.count(user->getBlock()))
+          continue;
+
+        builder.setInsertionPointToStart(user->getBlock());
+        auto lwiOp = builder.create<cgra::LwiOp>(user->getLoc(), val.getType(),
+                                                 addrCst.getResult());
+        loadOps[user->getBlock()] = lwiOp;
+        //  replace the use of val for the users in this block
+        val.replaceUsesWithIf(lwiOp.getResult(), [&](OpOperand &operand) {
+          return operand.getOwner()->getBlock() == user->getBlock();
+        });
+      }
+    }
+  }
+}
+
 void CgraFitToOpenEdgePass::runOnOperation() {
   ModuleOp modOp = dyn_cast<ModuleOp>(getOperation());
   MLIRContext *ctx = &getContext();
@@ -682,6 +791,9 @@ void CgraFitToOpenEdgePass::runOnOperation() {
       break;
     }
   }
+
+  pushBLASkernelLiveValToMemory(funcOp.getBody(), builder);
+
   if (!zeroOp)
     zeroOp = builder.create<arith::ConstantOp>(
         frontOp->getLoc(), builder.getI32Type(), builder.getI32IntegerAttr(0));

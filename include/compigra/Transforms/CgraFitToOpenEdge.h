@@ -44,10 +44,6 @@ LogicalResult removeEqualWidthBWOp(cgra::FuncOp funcOp);
 arith::AddIOp generateImmAddOp(arith::ConstantOp constOp, Operation *user,
                                PatternRewriter &rewriter);
 
-/// Check whether the constant operation has been adapted to generate by
-/// computation. Avoid generate multiple
-Operation *existsConstant(int intVal, SmallVector<Operation *> &insertedOps);
-
 /// Rewrite constant operations can not fit into Imm field
 Operation *generateValidConstant(arith::ConstantOp constOp,
                                  PatternRewriter &rewriter);
