@@ -27,7 +27,7 @@ def AffineScalarizeStore : Pass<"scalarize-store"> {
 def AffineMaximizeGemm : Pass<"affine-maximize-gemm"> {
   let summary = "Maximize the gemm size";
   let constructor = "compigra::createAffineMaximizeGemm()";
-  let dependentDialects = ["cgra::CgraDialect, affine::AffineDialect"];
+  let dependentDialects = ["cgra::CgraDialect, affine::AffineDialect, memref::MemRefDialect"];
 }
 
 //===----------------------------------------------------------------------===//
