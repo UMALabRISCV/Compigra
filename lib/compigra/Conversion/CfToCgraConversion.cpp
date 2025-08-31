@@ -637,44 +637,177 @@ void compigra::populateCfToCgraConversionPatterns(
                                             globalConstAddrs);
 }
 
-static void getBLASArguments(cgra::BlasGemmOp op,
-                             SmallVector<Value> &newOperands,
-                             OpBuilder &builder) {
+// Function to compute the linear offset of a subview operation
+// This creates arithmetic operations to calculate: offset = sum(index[i] *
+// stride[i]) + base_offset Parameters:
+//   - builder: OpBuilder to create arithmetic operations
+//   - loc: Location for the operations
+//   - subviewOp: The SubViewOp to compute offset for
+// Returns:
+//   - Value representing the computed linear offset
+Value computeSubviewOffset(OpBuilder &builder, Location loc,
+                           memref::SubViewOp subviewOp) {
+  Value sourceMemref = subviewOp.getSource();
+  MemRefType sourceType = sourceMemref.getType().cast<MemRefType>();
+  ArrayRef<int64_t> sourceShape = sourceType.getShape();
+
+  // Get the offsets from the subview operation
+  SmallVector<OpFoldResult> offsets = subviewOp.getMixedOffsets();
+  SmallVector<OpFoldResult> strides = subviewOp.getMixedStrides();
+
+  builder.setInsertionPointAfter(subviewOp);
+  // Start with zero offset
+  Value totalOffset = builder.create<arith::ConstantOp>(
+      loc, builder.getIndexType(), builder.getIndexAttr(0));
+
+  // Compute the stride values for each dimension of the source memref
+  SmallVector<Value> sourceStrides;
+  Value currentStride = builder.create<arith::ConstantOp>(
+      loc, builder.getIndexType(), builder.getIndexAttr(1));
+
+  // Calculate strides from innermost to outermost dimension
+  for (int i = sourceShape.size() - 1; i >= 0; --i) {
+    sourceStrides.insert(sourceStrides.begin(), currentStride);
+
+    if (i > 0) { // Don't multiply for the outermost dimension
+      Value dimSize;
+      if (sourceShape[i] == ShapedType::kDynamic) {
+        dimSize = builder.create<memref::DimOp>(loc, sourceMemref, i);
+      } else {
+        dimSize = builder.create<arith::ConstantOp>(
+            loc, builder.getIndexType(), builder.getIndexAttr(sourceShape[i]));
+      }
+      currentStride =
+          builder.create<arith::MulIOp>(loc, currentStride, dimSize);
+    }
+  }
+
+  // For each dimension, add offset[i] * source_stride[i] to total offset
+  for (size_t i = 0; i < offsets.size(); ++i) {
+    Value offsetValue;
+
+    // Extract the offset value (could be static or dynamic)
+    if (auto attr = offsets[i].dyn_cast<Attribute>()) {
+      int64_t staticOffset = attr.cast<IntegerAttr>().getInt();
+      if (staticOffset != 0) {
+        offsetValue = builder.create<arith::ConstantOp>(
+            loc, builder.getIndexType(), builder.getIndexAttr(staticOffset));
+      } else {
+        continue; // Skip if offset is 0
+      }
+    } else {
+      offsetValue = offsets[i].get<Value>();
+
+      // Check if the offset is zero (optimization)
+      if (auto constOp = offsetValue.getDefiningOp<arith::ConstantOp>()) {
+        if (auto intAttr = constOp.getValue().dyn_cast<IntegerAttr>()) {
+          if (intAttr.getInt() == 0) {
+            continue; // Skip if offset is 0
+          }
+        }
+      }
+    }
+
+    // Multiply offset by corresponding stride
+    Value contribution =
+        builder.create<arith::MulIOp>(loc, offsetValue, sourceStrides[i]);
+
+    // Add to total offset
+    totalOffset = builder.create<arith::AddIOp>(loc, totalOffset, contribution);
+  }
+
+  return totalOffset;
+}
+
+static LogicalResult getBLASArguments(cgra::BlasGemmOp op,
+                                      SmallVector<Value> &newOperands,
+                                      OpBuilder &builder, func::FuncOp funcOp) {
   for (auto operand : op.getOperands()) {
-    auto blockArg = dyn_cast<BlockArgument>(operand);
-    if (!blockArg) {
+    // check whether index or integer type
+    if (operand.getType().isa<IndexType>() ||
+        operand.getType().isa<IntegerType>()) {
       newOperands.push_back(operand);
       continue;
     }
 
-    auto memrefType = dyn_cast<MemRefType>(blockArg.getType());
+    auto memrefType = dyn_cast_or_null<MemRefType>(operand.getType());
     if (!memrefType) {
       newOperands.push_back(operand);
       continue;
     }
 
-    if (memrefType.getRank() != 2 ||
-        !memrefType.getElementType().isInteger(32)) {
-      newOperands.push_back(operand);
-      continue;
+    if (memrefType.getRank() < 2)
+      return failure();
+
+    if (memrefType.getRank() == 2) {
+      if (auto blockArg = dyn_cast_or_null<BlockArgument>(operand)) {
+        builder.setInsertionPointToStart(&funcOp.getBlocks().front());
+        auto baseOp =
+            builder.create<cgra::LwdOp>(op.getLoc(), builder.getI32Type());
+        baseOp->setAttr("BaseAddr",
+                        builder.getStringAttr(
+                            "arg" + std::to_string(blockArg.getArgNumber())));
+
+        newOperands.push_back(baseOp->getResult(0));
+        continue;
+      } else {
+        return failure();
+      }
     }
 
+    // beyond 2D memref, check whether is produced by a subview operation, and
+    // first (N-2) dimension are all 1.
+    auto prodOp = dyn_cast_or_null<memref::SubViewOp>(operand.getDefiningOp());
+    if (!prodOp)
+      return failure();
+
+    ArrayRef<int64_t> shape = memrefType.getShape();
+    int64_t rank = shape.size();
+    for (int i = 0; i < rank - 2; i++) {
+      if (shape[i] != 1)
+        return failure();
+    }
+
+    // compute the offset of the subview operation
+    auto offSet = computeSubviewOffset(builder, op.getLoc(), prodOp);
+    if (isa<IndexType>(offSet.getType())) {
+      auto castOp = builder.create<arith::IndexCastOp>(
+          op.getLoc(), builder.getI32Type(), offSet);
+      offSet = castOp.getResult();
+    }
+    // offset = offset * 4
+    auto byteOp = builder.create<arith::ConstantIntOp>(op.getLoc(), 4,
+                                                       builder.getI32Type());
+    auto offMulOp = builder.create<arith::MulIOp>(
+        op.getLoc(), builder.getI32Type(), offSet, byteOp->getResult(0));
+    auto blockArg = dyn_cast_or_null<BlockArgument>(prodOp.getSource());
+    if (!blockArg)
+      return failure();
+    builder.setInsertionPointToStart(&funcOp.getBlocks().front());
     auto baseOp =
         builder.create<cgra::LwdOp>(op.getLoc(), builder.getI32Type());
     baseOp->setAttr(
         "BaseAddr",
         builder.getStringAttr("arg" + std::to_string(blockArg.getArgNumber())));
+    builder.setInsertionPoint(op);
+    auto startAddr = builder.create<arith::AddIOp>(
+        op.getLoc(), builder.getI32Type(), baseOp->getResult(0),
+        offMulOp.getResult());
 
-    newOperands.push_back(baseOp->getResult(0));
+    newOperands.push_back(startAddr->getResult(0));
   }
 
   // create save operation to store the operands to the memory
-  builder.setInsertionPoint(op);
   for (auto [ind, operand] : llvm::enumerate(newOperands)) {
+    if (operand.getParentBlock() == op->getBlock())
+      builder.setInsertionPoint(op);
+    else
+      builder.setInsertionPoint(operand.getParentBlock()->getTerminator());
     auto addrOp = builder.create<arith::ConstantIntOp>(
         op.getLoc(), 0xFE00 + ind * 4, builder.getI32Type());
     builder.create<cgra::SwiOp>(op.getLoc(), operand, addrOp->getResult(0));
   }
+  return success();
 }
 
 static void connectPredecessorToInitBlk(SmallVector<mlir::Block *> predecessors,
@@ -701,23 +834,37 @@ static void connectPredecessorToInitBlk(SmallVector<mlir::Block *> predecessors,
   }
 }
 
-static void transformkernelBLAS(func::FuncOp funcOp, OpBuilder &builder) {
+static LogicalResult transformkernelBLAS(func::FuncOp funcOp,
+                                         OpBuilder &builder) {
   // if find a blas gemm operation, create a new block for it
   SmallVector<cgra::BlasGemmOp> blasOps;
   for (auto op : funcOp.getOps<cgra::BlasGemmOp>()) {
     // revise the operands of op
-    // if the operands is memref type -> memref.load %opr[cst0]
-    // Assuming this is within a pattern rewriter or transformation pass
+    // get the subview operation
+    SmallVector<memref::SubViewOp> subviewOps;
+    for (auto operand : op.getOperands()) {
+      auto subviewOp =
+          dyn_cast_or_null<memref::SubViewOp>(operand.getDefiningOp());
+      if (subviewOp)
+        subviewOps.push_back(subviewOp);
+    }
+
     SmallVector<Value> newOperands;
-    builder.setInsertionPoint(op);
-    getBLASArguments(op, newOperands, builder);
+    if (failed(getBLASArguments(op, newOperands, builder, funcOp)))
+      return failure();
 
     // Update the operation with new operands
     op->setOperands(newOperands);
+    // remove subview operation if it is not used anymore
+    for (auto subviewOp : subviewOps) {
+      if (subviewOp->use_empty())
+        subviewOp.erase();
+    }
+
     blasOps.push_back(op);
   }
   if (blasOps.empty())
-    return;
+    return success();
 
   // create sequential CFG for the blas gemm operation
   for (auto blasOp : blasOps) {
@@ -758,6 +905,7 @@ static void transformkernelBLAS(func::FuncOp funcOp, OpBuilder &builder) {
     // move cgra.BlasGemmOp to blasBlk
     blasOp->moveBefore(blasBlk->getTerminator());
   }
+  return success();
 }
 
 void CfToCgraConversionPass::runOnOperation() {
@@ -803,11 +951,11 @@ void CfToCgraConversionPass::runOnOperation() {
 
   // raise the constant operation to the top level
   auto funcOps = modOp.getOps<func::FuncOp>();
-  // if (!funcOps.empty()) {
-  //   auto funcOp = *funcOps.begin();
-  //   if (failed(removeUnusedOps(funcOp)) || failed(raiseConstOpToTop(funcOp)))
-  //     signalPassFailure();
-  // }
+  if (!funcOps.empty()) {
+    auto funcOp = *funcOps.begin();
+    if (failed(removeUnusedOps(funcOp)) || failed(raiseConstOpToTop(funcOp)))
+      signalPassFailure();
+  }
 }
 
 namespace compigra {

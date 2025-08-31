@@ -238,10 +238,9 @@ Operation *existConstant(int intVal, SmallVector<Operation *> &insertedOps) {
 LogicalResult raiseConstOperation(func::FuncOp funcOp) {
   Operation &beginOp = *funcOp.getOps().begin();
   // raise the constant operation to the top level
-  auto constantOps = funcOp.template getOps<arith::ConstantIntOp>();
+  auto constantOps = funcOp.getOps<arith::ConstantIntOp>();
   for (auto op : llvm::make_early_inc_range(constantOps))
-    if (op->getBlock()->isEntryBlock())
-      op->moveBefore(&beginOp);
+    op->moveBefore(&beginOp);
 
   return success();
 }
@@ -258,7 +257,7 @@ LogicalResult removeUnusedConstOp(func::FuncOp funcOp) {
 }
 
 LogicalResult removeEqualWidthBWOp(func::FuncOp funcOp) {
-  auto sextOps = funcOp.template getOps<LLVM::SExtOp>();
+  auto sextOps = funcOp.getOps<LLVM::SExtOp>();
   for (auto op : llvm::make_early_inc_range(sextOps)) {
     if (op.getOperand().getType() == op.getResult().getType()) {
       if (op.getOperand().getDefiningOp())
@@ -278,7 +277,8 @@ static bool isLoopBlock(Block *blk) {
 }
 
 Operation *generateValidConstant(arith::ConstantOp constOp,
-                                 PatternRewriter &rewriter) {
+                                 PatternRewriter &rewriter,
+                                 bool beforeUser = false) {
   int32_t valAttr =
       (int32_t)constOp->getAttr("value").dyn_cast<IntegerAttr>().getInt();
 
@@ -296,7 +296,10 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
     rewriter.setInsertionPoint(firstOp);
     loc = firstOp->getLoc();
   } else {
-    rewriter.setInsertionPoint(constOp);
+    if (beforeUser)
+      rewriter.setInsertionPoint(*constOp->getUsers().begin());
+    else
+      rewriter.setInsertionPoint(constOp);
   }
 
   // get the lowest 0-11 bits
@@ -591,9 +594,12 @@ ConstantOpRewrite::matchAndRewrite(arith::ConstantOp constOp,
     auto validOp = existConstantOp(value, insertedOps);
     if (validOp && validOp->getBlock() == constOp->getBlock()) {
       // set it to valid range, to be removed later on
-      constOp.replaceAllUsesWith(validOp);
+      constOp.getResult().replaceUsesWithIf(
+          validOp->getResult(0), [&](OpOperand &operand) {
+            return operand.getOwner()->getBlock() == validOp->getBlock();
+          });
     } else {
-      auto addOp = generateValidConstant(constOp, rewriter);
+      auto addOp = generateValidConstant(constOp, rewriter, true);
       insertedOps.push_back(addOp);
     }
     // set the value to 0, to be removed later on
@@ -718,15 +724,21 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
       if (llvm::is_contained(firstOp.getOperands(), val))
         continue;
 
-      // push the value to memory
-      auto predBlk = blk.getSinglePredecessor();
-      builder.setInsertionPointToEnd(predBlk);
+      auto defOp = val.getDefiningOp();
+      if (!defOp) {
+        auto predBlk = val.getParentBlock();
+        builder.setInsertionPoint(predBlk->getTerminator());
+      } else {
+        auto prodBlk = defOp->getBlock();
+        builder.setInsertionPoint(prodBlk->getTerminator());
+      }
+
       auto addrCst = builder.create<arith::ConstantOp>(
           blk.getTerminator()->getLoc(), builder.getI32Type(),
           builder.getI32IntegerAttr(baseAddr));
-      baseAddr += 4;
       builder.create<cgra::SwiOp>(blk.getTerminator()->getLoc(), val,
                                   addrCst.getResult());
+
       // load the value from memory in the block
       DenseMap<Block *, Operation *> loadOps;
       for (auto user : llvm::make_early_inc_range(val.getUsers())) {
@@ -735,6 +747,10 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
           continue;
 
         builder.setInsertionPointToStart(user->getBlock());
+        auto addrCst = builder.create<arith::ConstantOp>(
+            blk.getTerminator()->getLoc(), builder.getI32Type(),
+            builder.getI32IntegerAttr(baseAddr));
+
         auto lwiOp = builder.create<cgra::LwiOp>(user->getLoc(), val.getType(),
                                                  addrCst.getResult());
         loadOps[user->getBlock()] = lwiOp;
@@ -743,6 +759,7 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
           return operand.getOwner()->getBlock() == user->getBlock();
         });
       }
+      baseAddr += 4;
     }
   }
 }
