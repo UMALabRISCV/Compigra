@@ -13,7 +13,18 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#ifdef HAVE_Z3
+#include "z3++.h"
+#endif
 
 using namespace mlir;
 
 bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp);
+
+void getAllStatements(affine::AffineForOp outerFor,
+                      SetVector<Operation *> &statements);
+
+std::vector<std::vector<std::vector<int>>>
+generateScheduleFunction(const SetVector<Operation *> &statements,
+                         const SmallVector<Operation *> &blasOps,
+                         int scheduleDimensions = 7);

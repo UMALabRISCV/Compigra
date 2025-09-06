@@ -16,6 +16,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 
 using namespace mlir;
+using namespace mlir::affine;
 
 bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp) {
   auto storeVal = storeOp.getValueToStore();
@@ -50,4 +51,424 @@ bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp) {
     singleUser = getSingleUser(singleUser->getResult(0));
   }
   return false;
+}
+
+void getAllStatements(affine::AffineForOp outerFor,
+                      SetVector<Operation *> &statements) {
+  outerFor.walk([&statements](mlir::Operation *op) {
+    if (isa<affine::AffineLoadOp, affine::AffineStoreOp>(op))
+      statements.insert(op);
+  });
+}
+
+#ifdef HAVE_Z3
+using namespace z3;
+
+struct MemoryAccess {
+  Operation *op;
+  bool isLoad;
+  std::vector<Value> indices;
+  Value memref;
+  int statementId;
+
+  MemoryAccess(Operation *operation, bool load, Value mem, int stmtId)
+      : op(operation), isLoad(load), memref(mem), statementId(stmtId) {}
+};
+
+class ScheduleFunctionGenerator {
+private:
+  context ctx;
+  solver s;
+  std::vector<Operation *> statements;
+  std::vector<MemoryAccess> memoryAccesses;
+
+  Operation *blasLoad1, *blasLoad2, *blasStore;
+  int blasLoad1Id, blasLoad2Id, blasStoreId;
+
+  // Schedule matrix: scheduleMatrix[stmtId][row][col]
+  // Each statement has m rows (schedule dimensions) and n=4 columns (3 loops +
+  // constant)
+  std::map<std::tuple<int, int, int>, expr> scheduleMatrix;
+  int numStatements;
+  int numScheduleDimensions; // m - number of schedule dimensions (rows)
+  int numLoopDimensions;     // n=4 - three loops + constant (columns)
+
+public:
+  ScheduleFunctionGenerator(const SetVector<Operation *> &stmts,
+                            int scheduleDims = 2)
+      : s(ctx), numStatements(stmts.size()),
+        numScheduleDimensions(scheduleDims), numLoopDimensions(4) {
+
+    // Convert SetVector to std::vector
+    for (Operation *op : stmts) {
+      statements.push_back(op);
+    }
+
+    // Initialize schedule matrix variables
+    initializeScheduleMatrix();
+
+    // Collect memory accesses
+    collectMemoryAccesses();
+  }
+
+  void setBLASOps(Operation *load1, Operation *load2, Operation *store) {
+    blasLoad1 = load1;
+    blasLoad2 = load2;
+    blasStore = store;
+
+    auto getStatementId = [this](Operation *op) -> std::ptrdiff_t {
+      auto it = std::find(statements.begin(), statements.end(), op);
+      if (it != statements.end()) {
+        return std::distance(statements.begin(), it);
+      } else {
+        return -1; // Not found
+      }
+    };
+
+    blasLoad1Id = getStatementId(blasLoad1);
+    blasLoad2Id = getStatementId(blasLoad2);
+    blasStoreId = getStatementId(blasStore);
+    llvm::errs() << "BLAS Load1 ID: " << blasLoad1Id << "\n";
+    llvm::errs() << "BLAS Load2 ID: " << blasLoad2Id << "\n";
+    llvm::errs() << "BLAS Store ID: " << blasStoreId << "\n";
+  }
+
+  expr getScheduleVar(int stmtId, int row, int col) {
+    return scheduleMatrix.at({stmtId, row, col});
+  }
+
+  void initializeScheduleMatrix() {
+    for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
+      for (int row = 0; row < numScheduleDimensions; ++row) {
+        for (int col = 0; col < numLoopDimensions; ++col) {
+          std::string varName = "theta_" + std::to_string(stmtId) + "_" +
+                                std::to_string(row) + "_" + std::to_string(col);
+          scheduleMatrix.emplace(std::make_tuple(stmtId, row, col),
+                                 ctx.int_const(varName.c_str()));
+        }
+      }
+    }
+  }
+
+  void collectMemoryAccesses() {
+    for (int i = 0; i < statements.size(); ++i) {
+      Operation *op = statements[i];
+
+      if (auto loadOp = dyn_cast<AffineLoadOp>(op)) {
+        MemoryAccess access(op, true, loadOp.getMemRef(), i);
+
+        // Extract indices
+        for (Value idx : loadOp.getIndices()) {
+          access.indices.push_back(idx);
+        }
+        memoryAccesses.push_back(access);
+
+      } else if (auto storeOp = dyn_cast<AffineStoreOp>(op)) {
+        MemoryAccess access(op, false, storeOp.getMemRef(), i);
+
+        // Extract indices
+        for (Value idx : storeOp.getIndices()) {
+          access.indices.push_back(idx);
+        }
+        memoryAccesses.push_back(access);
+      }
+    }
+  }
+
+  // Compute schedule vector for a statement at given iteration
+  std::vector<expr>
+  computeScheduleVector(int stmtId, const std::vector<expr> &iterationVector) {
+    std::vector<expr> scheduleVector;
+
+    for (int row = 0; row < numScheduleDimensions; ++row) {
+      expr scheduleTime = ctx.int_val(0);
+
+      // For each row: time = sum(theta[stmtId][row][col] *
+      // iterationVector[col]) iterationVector should be [i1, i2, i3, 1] to
+      // handle constant term
+      for (int col = 0; col < numLoopDimensions; ++col) {
+        if (col < iterationVector.size()) {
+          scheduleTime = scheduleTime + getScheduleVar(stmtId, row, col) *
+                                            iterationVector[col];
+        } else {
+          // This shouldn't happen if iterationVector includes constant 1
+          scheduleTime = scheduleTime + getScheduleVar(stmtId, row, col);
+        }
+      }
+      scheduleVector.push_back(scheduleTime);
+    }
+
+    return scheduleVector;
+  }
+
+  // Lexicographic comparison: vec1 < vec2
+  expr lexicographicLess(const std::vector<expr> &vec1,
+                         const std::vector<expr> &vec2) {
+    expr result = ctx.bool_val(false);
+
+    for (int i = 0; i < std::min(vec1.size(), vec2.size()); ++i) {
+      expr prefixEqual = ctx.bool_val(true);
+
+      // All previous dimensions are equal
+      for (int j = 0; j < i; ++j) {
+        prefixEqual = prefixEqual && (vec1[j] == vec2[j]);
+      }
+
+      // Current dimension: vec1[i] < vec2[i]
+      expr currentLess = prefixEqual && (vec1[i] < vec2[i]);
+      result = result || currentLess;
+    }
+
+    return result;
+  }
+
+  void addOrderingConstraints() {
+    // First three statements must be strictly ordered: S0 < S1 < S2 < Sk
+    // Iteration vector includes constant 1: [i1, i2, i3, 1]
+    std::vector<expr> iterVars = {ctx.int_const("i1"), ctx.int_const("i2"),
+                                  ctx.int_const("i3"), ctx.int_val(1)};
+
+    // blasLoad1 < blasLoad2 < blasStore
+    if (statements.size() > 1) {
+      s.add(getScheduleVar(blasLoad1Id, 1, 0) == 1);
+      s.add(getScheduleVar(blasLoad1Id, 3, 1) == 1);
+      s.add(getScheduleVar(blasLoad1Id, 5, 2) == 1);
+
+      s.add(getScheduleVar(blasLoad2Id, 1, 0) == 1);
+      s.add(getScheduleVar(blasLoad2Id, 3, 1) == 1);
+      s.add(getScheduleVar(blasLoad2Id, 5, 2) == 1);
+
+      auto scheduleS0 = computeScheduleVector(blasLoad1Id, iterVars);
+      auto scheduleS1 = computeScheduleVector(blasLoad2Id, iterVars);
+      s.add(lexicographicLess(scheduleS0, scheduleS1));
+    }
+
+    if (statements.size() > 2) {
+      s.add(getScheduleVar(blasStoreId, 1, 0) == 1);
+      s.add(getScheduleVar(blasStoreId, 3, 1) == 1);
+
+      auto scheduleS1 = computeScheduleVector(blasLoad2Id, iterVars);
+      auto scheduleS2 = computeScheduleVector(blasStoreId, iterVars);
+      llvm::errs() << "Adding ordering constraint: " << blasLoad2Id << " < "
+                   << blasStoreId << "\n";
+      s.add(lexicographicLess(scheduleS1, scheduleS2));
+    }
+
+    // S2 < Sk for all k > 2
+    if (statements.size() > 3) {
+      auto scheduleS2 = computeScheduleVector(blasStoreId, iterVars);
+      for (int k = 0; k < statements.size(); ++k) {
+        if (k == blasLoad1Id || k == blasLoad2Id || k == blasStoreId)
+          continue;
+        auto scheduleSk = computeScheduleVector(k, iterVars);
+        s.add(lexicographicLess(scheduleS2, scheduleSk));
+      }
+    }
+  }
+
+  void addSplitConstraints() {
+    // For non-BLAS statements, Sk should be completely split to current scope
+    int lastD = numLoopDimensions - 1;
+    for (int k = 0; k < statements.size(); ++k) {
+      if (k == blasLoad1Id || k == blasLoad2Id || k == blasStoreId)
+        s.add(getScheduleVar(k, 0, lastD) == 0);
+      else
+        s.add(getScheduleVar(k, 0, lastD) >= 1);
+    }
+  }
+
+  void addMemoryConsistencyConstraints() {
+    // For each pair of memory accesses to the same address
+    for (int i = 0; i < memoryAccesses.size(); ++i) {
+      for (int j = i + 1; j < memoryAccesses.size(); ++j) {
+        const MemoryAccess &access1 = memoryAccesses[i];
+        const MemoryAccess &access2 = memoryAccesses[j];
+
+        // Check if accessing the same memory location
+        if (access1.memref == access2.memref &&
+            accessesSameLocation(access1, access2)) {
+
+          // Create iteration domain variables (including constant 1)
+          std::vector<expr> iter1 = {
+              ctx.int_const(("i1_" + std::to_string(i)).c_str()),
+              ctx.int_const(("i2_" + std::to_string(i)).c_str()),
+              ctx.int_const(("i3_" + std::to_string(i)).c_str()),
+              ctx.int_val(1)};
+
+          std::vector<expr> iter2 = {
+              ctx.int_const(("i1_" + std::to_string(j)).c_str()),
+              ctx.int_const(("i2_" + std::to_string(j)).c_str()),
+              ctx.int_const(("i3_" + std::to_string(j)).c_str()),
+              ctx.int_val(1)};
+
+          // Add dependence constraint
+          if (createsDependence(access1, access2)) {
+            llvm::errs() << "Dependence between statements "
+                         << access1.statementId << " < " << access2.statementId
+                         << "\n";
+            auto schedule1 = computeScheduleVector(access1.statementId, iter1);
+            auto schedule2 = computeScheduleVector(access2.statementId, iter2);
+
+            s.add(lexicographicLess(schedule1, schedule2));
+          }
+        }
+      }
+    }
+  }
+
+  bool accessesSameLocation(const MemoryAccess &acc1,
+                            const MemoryAccess &acc2) {
+    // Simplified check - in practice, you'd need more sophisticated analysis
+    return acc1.memref == acc2.memref &&
+           acc1.indices.size() == acc2.indices.size();
+  }
+
+  bool createsDependence(const MemoryAccess &acc1, const MemoryAccess &acc2) {
+    // True dependence: Read after Write
+    // Anti-dependence: Write after Read
+    // Output dependence: Write after Write
+    return (!acc1.isLoad && acc2.isLoad) || // RAW
+           (acc1.isLoad && !acc2.isLoad) || // WAR
+           (!acc1.isLoad && !acc2.isLoad);  // WAW
+  }
+
+  void addBoundConstraints() {
+    // Add reasonable bounds to avoid unbounded solutions
+    for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
+      for (int row = 0; row < numScheduleDimensions; ++row) {
+        for (int col = 0; col < numLoopDimensions; ++col) {
+          s.add(getScheduleVar(stmtId, row, col) >= 0);
+          s.add(getScheduleVar(stmtId, row, col) <= 1);
+        }
+      }
+    }
+  }
+
+  void addRowSumConstraints() {
+    // Ensure that for each statement, the sum of coefficients in each row is at
+    // least 1
+    for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
+      for (int col = 0; col < numLoopDimensions; ++col) {
+        expr rowSum = ctx.int_val(0);
+        for (int row = 0; row < numScheduleDimensions; ++row) {
+          rowSum = rowSum + getScheduleVar(stmtId, row, col);
+        }
+        s.add(rowSum <= 1);
+      }
+    }
+  }
+
+  void addOptimizationGoal() {
+    // Minimize the sum of absolute values of coefficients in even rows (rows %
+    // 2 == 0)
+    expr objective = ctx.int_val(0);
+
+    for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
+      for (int row = 0; row < numScheduleDimensions; row += 2) {
+        for (int col = 0; col < numLoopDimensions; ++col) {
+          expr coeff = getScheduleVar(stmtId, row, col);
+
+          // Add absolute value using auxiliary variables
+          expr absVar =
+              ctx.int_const(("abs_" + std::to_string(stmtId) + "_" +
+                             std::to_string(row) + "_" + std::to_string(col))
+                                .c_str());
+
+          // Constraints for absolute value: absVar >= coeff and absVar >=
+          // -coeff
+          s.add(absVar >= coeff);
+          s.add(absVar >= -coeff);
+          s.add(absVar >= 0);
+
+          // Add to objective
+          objective = objective + absVar;
+        }
+      }
+    }
+
+    // Create optimizer and transfer constraints
+    optimize opt(ctx);
+    for (auto const &assertion : s.assertions()) {
+      opt.add(assertion);
+    }
+    opt.minimize(objective);
+
+    // Use optimizer instead of solver for final solving
+    if (opt.check() == sat) {
+      model m = opt.get_model();
+    }
+  }
+
+  std::vector<std::vector<std::vector<int>>> generateSchedule() {
+    // Add all constraints
+    addOrderingConstraints();
+    llvm::errs() << "Ordering constraints added\n";
+    addSplitConstraints();
+    llvm::errs() << "Split constraints added\n";
+    addMemoryConsistencyConstraints();
+    llvm::errs() << "Memory consistency constraints added\n";
+    addBoundConstraints();
+    llvm::errs() << "Bound constraints added\n";
+    addRowSumConstraints();
+    llvm::errs() << "Column sum constraints added\n";
+
+    std::vector<std::vector<std::vector<int>>> result;
+
+    if (s.check() == sat) {
+      model m = s.get_model();
+      result.resize(numStatements);
+
+      for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
+        result[stmtId].resize(numScheduleDimensions);
+        for (int row = 0; row < numScheduleDimensions; ++row) {
+          result[stmtId][row].resize(numLoopDimensions);
+          for (int col = 0; col < numLoopDimensions; ++col) {
+            result[stmtId][row][col] =
+                m.eval(getScheduleVar(stmtId, row, col)).get_numeral_int();
+          }
+        }
+      }
+
+      // Print the schedule matrices
+      llvm::errs() << "Schedule Matrices:\n";
+      for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
+        llvm::errs() << *statements[stmtId] << "\n";
+        llvm::errs() << "S" << stmtId << ":\n";
+        for (int row = 0; row < numScheduleDimensions; ++row) {
+          llvm::errs() << "  [";
+          for (int col = 0; col < numLoopDimensions; ++col) {
+            llvm::errs() << result[stmtId][row][col];
+            if (col < numLoopDimensions - 1)
+              llvm::errs() << ", ";
+          }
+          llvm::errs() << "]\n";
+        }
+        llvm::errs() << "\n";
+      }
+    } else {
+      llvm::errs() << "No valid schedule found!\n";
+    }
+
+    return result;
+  }
+};
+#endif
+
+// Main function to generate schedule
+std::vector<std::vector<std::vector<int>>>
+generateScheduleFunction(const SetVector<Operation *> &statements,
+                         const SmallVector<Operation *> &blasOps,
+                         int scheduleDimensions) {
+#ifdef HAVE_Z3
+  ScheduleFunctionGenerator generator(statements, scheduleDimensions);
+  if (blasOps.size() == 3) {
+    generator.setBLASOps(blasOps[0], blasOps[1], blasOps[2]);
+  } else {
+    llvm::errs() << "Not enough BLAS operations provided\n";
+  }
+  return generator.generateSchedule();
+#else
+  llvm::errs() << "Z3 not available, cannot generate schedule\n";
+  return {};
+#endif
 }
