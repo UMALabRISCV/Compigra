@@ -19,6 +19,7 @@
 
 using namespace mlir;
 
+namespace compigra {
 bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp);
 
 void getAllStatements(affine::AffineForOp outerFor,
@@ -27,3 +28,10 @@ void getAllStatements(affine::AffineForOp outerFor,
 std::vector<std::vector<std::vector<int>>> generateScheduleFunction(
     affine::AffineForOp &outerFor, const SetVector<Operation *> &statements,
     const SmallVector<Operation *> &blasOps, int scheduleDimensions = 7);
+
+LogicalResult reorderStatements(
+    affine::AffineForOp outerFor,
+    const std::vector<std::vector<std::vector<int>>> &scheduleMatrix,
+    const SetVector<Operation *> &statements, OpBuilder &builder);
+
+} // namespace compigra
