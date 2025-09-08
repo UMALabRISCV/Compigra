@@ -381,6 +381,37 @@ bool isBackEdge(Operation *srcOp, Operation *dstOp) {
   return isBackEdge(srcOp->getBlock(), dstOp->getBlock());
 }
 
+bool consumesResult(Operation *opi, Operation *opj) {
+  if (opi == opj)
+    return false; // usually we don’t consider an op consuming itself
+
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  llvm::SmallVector<Operation *, 16> worklist;
+
+  // Seed worklist with defining ops of opj's operands
+  for (Value operand : opj->getOperands()) {
+    if (Operation *defOp = operand.getDefiningOp())
+      worklist.push_back(defOp);
+  }
+
+  while (!worklist.empty()) {
+    Operation *cur = worklist.pop_back_val();
+    if (!visited.insert(cur).second)
+      continue;
+
+    if (cur == opi)
+      return true;
+
+    // Traverse further up
+    for (Value operand : cur->getOperands()) {
+      if (Operation *defOp = operand.getDefiningOp())
+        worklist.push_back(defOp);
+    }
+  }
+
+  return false;
+}
+
 void removeBlockArgs(Operation *term, std::vector<unsigned> argId, Block *dest,
                      OpBuilder &builder) {
   builder.setInsertionPoint(term);

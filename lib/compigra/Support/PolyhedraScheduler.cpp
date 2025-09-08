@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "compigra/Support/PolyhedraScheduler.h"
+#include "compigra/Support/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 
@@ -75,12 +76,21 @@ struct MemoryAccess {
       : op(operation), isLoad(load), memref(mem), statementId(stmtId) {}
 };
 
+struct StatementInfo {
+  Operation *op;
+  DenseMap<AffineForOp, std::pair<int, int>> bounds;
+};
+
 class ScheduleFunctionGenerator {
 private:
   context ctx;
   solver s;
   std::vector<Operation *> statements;
   std::vector<MemoryAccess> memoryAccesses;
+  AffineForOp rootLoop;
+  // Ordered index of the loop iterators
+  SmallVector<AffineForOp, 4> loops;
+  DenseMap<int, StatementInfo> statementInfos;
 
   Operation *blasLoad1, *blasLoad2, *blasStore;
   int blasLoad1Id, blasLoad2Id, blasStoreId;
@@ -94,13 +104,42 @@ private:
   int numLoopDimensions;     // n=4 - three loops + constant (columns)
 
 public:
-  ScheduleFunctionGenerator(const SetVector<Operation *> &stmts,
+  ScheduleFunctionGenerator(AffineForOp rootLoop,
+                            const SetVector<Operation *> &stmts,
                             int scheduleDims = 2)
-      : s(ctx), numStatements(stmts.size()),
+      : rootLoop(rootLoop), s(ctx), numStatements(stmts.size()),
         numScheduleDimensions(scheduleDims), numLoopDimensions(4) {
+    DenseMap<Operation *, std::pair<int, int>> bounds;
+    rootLoop.walk([&](AffineForOp forOp) {
+      auto lowerBound = forOp.getLowerBound().getMap();
+      auto upperBound = forOp.getUpperBound().getMap();
+      int lb = lowerBound.isSingleConstant()
+                   ? lowerBound.getSingleConstantResult()
+                   : 100;
+      int ub = upperBound.isSingleConstant()
+                   ? upperBound.getSingleConstantResult()
+                   : 100;
+      bounds[forOp] = {lb, ub};
+      loops.insert(loops.begin(), forOp);
+    });
 
     // Convert SetVector to std::vector
     for (Operation *op : stmts) {
+      StatementInfo info;
+
+      auto curBlock = op->getBlock();
+      // Find all enclosing loops and their bounds
+      while (curBlock) {
+        if (auto forOp = dyn_cast<AffineForOp>(curBlock->getParentOp())) {
+          if (bounds.find(forOp) != bounds.end())
+            info.bounds[forOp] = bounds[forOp];
+        }
+        curBlock = curBlock->getParentOp() ? curBlock->getParentOp()->getBlock()
+                                           : nullptr;
+      }
+
+      info.op = op;
+      statementInfos[statements.size()] = info;
       statements.push_back(op);
     }
 
@@ -111,6 +150,72 @@ public:
     collectMemoryAccesses();
   }
 
+private:
+  std::vector<std::vector<int>>
+  generateIterationPoints(const std::vector<std::pair<int, int>> &bounds) {
+    size_t k = bounds.size();
+    std::vector<int> sizes(k);
+    size_t total = 1;
+
+    // Compute size of each dimension and total number of rows
+    for (size_t i = 0; i < k; ++i) {
+      int lower = bounds[i].first;
+      int upper = bounds[i].second;
+      if (lower > upper) {
+        sizes[i] = 1; // column fixed to zero
+      } else {
+        sizes[i] = upper - lower + 1;
+      }
+      total *= sizes[i];
+    }
+
+    std::vector<std::vector<int>> result;
+    result.reserve(total);
+
+    // Generate combinations
+    for (size_t idx = 0; idx < total; ++idx) {
+      std::vector<int> row(k);
+      size_t temp = idx;
+
+      for (size_t j = 0; j < k; ++j) {
+        int lower = bounds[j].first;
+        int upper = bounds[j].second;
+
+        if (lower > upper) {
+          row[j] = 0;
+        } else {
+          int offset = temp % sizes[j];
+          row[j] = lower + offset;
+          temp /= sizes[j];
+        }
+      }
+      result.push_back(std::move(row));
+    }
+
+    return result;
+  }
+
+  // Add lexicographic ordering constraint
+  void addLexicographicConstraint(solver &s, const std::vector<expr> &vec1,
+                                  const std::vector<expr> &vec2, bool strict) {
+    expr result = ctx.bool_val(false);
+
+    for (int i = 0; i < std::min(vec1.size(), vec2.size()); ++i) {
+      expr prefixEqual = ctx.bool_val(true);
+
+      // All previous dimensions are equal
+      for (int j = 0; j < i; ++j) {
+        prefixEqual = prefixEqual && (vec1[j] == vec2[j]);
+      }
+
+      // Current dimension: vec1[i] < vec2[i]
+      expr currentLess = prefixEqual && (vec1[i] < vec2[i]);
+      result = result || currentLess;
+    }
+    s.add(result == ctx.bool_val(true));
+  };
+
+public:
   void setBLASOps(Operation *load1, Operation *load2, Operation *store) {
     blasLoad1 = load1;
     blasLoad2 = load2;
@@ -187,13 +292,8 @@ public:
       // iterationVector[col]) iterationVector should be [i1, i2, i3, 1] to
       // handle constant term
       for (int col = 0; col < numLoopDimensions; ++col) {
-        if (col < iterationVector.size()) {
-          scheduleTime = scheduleTime + getScheduleVar(stmtId, row, col) *
-                                            iterationVector[col];
-        } else {
-          // This shouldn't happen if iterationVector includes constant 1
-          scheduleTime = scheduleTime + getScheduleVar(stmtId, row, col);
-        }
+        scheduleTime = scheduleTime +
+                       getScheduleVar(stmtId, row, col) * iterationVector[col];
       }
       scheduleVector.push_back(scheduleTime);
     }
@@ -201,68 +301,109 @@ public:
     return scheduleVector;
   }
 
-  // Lexicographic comparison: vec1 < vec2
-  expr lexicographicLess(const std::vector<expr> &vec1,
-                         const std::vector<expr> &vec2) {
-    expr result = ctx.bool_val(false);
-
-    for (int i = 0; i < std::min(vec1.size(), vec2.size()); ++i) {
-      expr prefixEqual = ctx.bool_val(true);
-
-      // All previous dimensions are equal
-      for (int j = 0; j < i; ++j) {
-        prefixEqual = prefixEqual && (vec1[j] == vec2[j]);
-      }
-
-      // Current dimension: vec1[i] < vec2[i]
-      expr currentLess = prefixEqual && (vec1[i] < vec2[i]);
-      result = result || currentLess;
+  // Get all iteration points for a statement based on its bounds
+  std::vector<std::vector<int>> getAllIterationPoints(int stmtId) {
+    auto it = statementInfos.find(stmtId);
+    if (it == statementInfos.end()) {
+      return {};
     }
 
-    return result;
+    const StatementInfo &stmtInfo = it->second;
+
+    // Extract bounds for each loop level
+    std::vector<std::pair<int, int>> loopBounds;
+
+    // Need to order the loops by nesting level
+    // Assuming the bounds map is ordered by loop nesting depth
+    for (auto loop : loops) {
+      if (stmtInfo.bounds.find(loop) != stmtInfo.bounds.end()) {
+        auto bounds = stmtInfo.bounds.lookup(loop);
+        loopBounds.push_back(bounds);
+      } else {
+        // If the statement is outside this loop, fix the iteration to 0
+        loopBounds.push_back({0, -1});
+      }
+    }
+    // for (auto &boundPair : stmtInfo.bounds) {
+    //   AffineForOp forOp = boundPair.first;
+    //   std::pair<int, int> bounds = boundPair.second;
+    //   loopBounds.push_back(bounds);
+    // }
+
+    // Generate all combinations of iteration points
+    std::vector<std::vector<int>> iterationPoints =
+        generateIterationPoints(loopBounds);
+
+    return iterationPoints;
   }
 
-  void addOrderingConstraints() {
-    // First three statements must be strictly ordered: S0 < S1 < S2 < Sk
-    // Iteration vector includes constant 1: [i1, i2, i3, 1]
-    std::vector<expr> iterVars = {ctx.int_const("i1"), ctx.int_const("i2"),
-                                  ctx.int_const("i3"), ctx.int_val(1)};
+  // Add universal constraints for all iteration points of two statements
+  void addUniversalOrderingConstraint(int stmtId1, int stmtId2,
+                                      bool strict = true) {
+    auto points1 = getAllIterationPoints(stmtId1);
+    auto points2 = getAllIterationPoints(stmtId2);
 
-    // blasLoad1 < blasLoad2 < blasStore
-    if (statements.size() > 1) {
-      s.add(getScheduleVar(blasLoad1Id, 1, 0) == 1);
-      s.add(getScheduleVar(blasLoad1Id, 3, 1) == 1);
-      s.add(getScheduleVar(blasLoad1Id, 5, 2) == 1);
+    // For each valid iteration point in the intersection of domains
+    auto commonPoints = getCommonIterationPoints(points1, points2);
 
-      s.add(getScheduleVar(blasLoad2Id, 1, 0) == 1);
-      s.add(getScheduleVar(blasLoad2Id, 3, 1) == 1);
-      s.add(getScheduleVar(blasLoad2Id, 5, 2) == 1);
-
-      auto scheduleS0 = computeScheduleVector(blasLoad1Id, iterVars);
-      auto scheduleS1 = computeScheduleVector(blasLoad2Id, iterVars);
-      s.add(lexicographicLess(scheduleS0, scheduleS1));
-    }
-
-    if (statements.size() > 2) {
-      s.add(getScheduleVar(blasStoreId, 1, 0) == 1);
-      s.add(getScheduleVar(blasStoreId, 3, 1) == 1);
-
-      auto scheduleS1 = computeScheduleVector(blasLoad2Id, iterVars);
-      auto scheduleS2 = computeScheduleVector(blasStoreId, iterVars);
-      llvm::errs() << "Adding ordering constraint: " << blasLoad2Id << " < "
-                   << blasStoreId << "\n";
-      s.add(lexicographicLess(scheduleS1, scheduleS2));
-    }
-
-    // S2 < Sk for all k > 2
-    if (statements.size() > 3) {
-      auto scheduleS2 = computeScheduleVector(blasStoreId, iterVars);
-      for (int k = 0; k < statements.size(); ++k) {
-        if (k == blasLoad1Id || k == blasLoad2Id || k == blasStoreId)
-          continue;
-        auto scheduleSk = computeScheduleVector(k, iterVars);
-        s.add(lexicographicLess(scheduleS2, scheduleSk));
+    for (const auto &iterPoint : commonPoints) {
+      // Add constant term
+      std::vector<expr> fullIterPoint;
+      for (int val : iterPoint) {
+        fullIterPoint.push_back(ctx.int_val(val));
       }
+
+      fullIterPoint.push_back(ctx.int_val(1));
+
+      auto schedule1 = computeScheduleVector(stmtId1, fullIterPoint);
+      auto schedule2 = computeScheduleVector(stmtId2, fullIterPoint);
+
+      // Add lexicographic constraint: schedule1 < schedule2 (or <=)
+      addLexicographicConstraint(s, schedule1, schedule2, strict);
+    }
+  }
+
+  // Get common iteration points between two statements
+  std::vector<std::vector<int>>
+  getCommonIterationPoints(std::vector<std::vector<int>> points1,
+                           std::vector<std::vector<int>> points2) {
+    if (points1.empty() || points2.empty())
+      return {};
+
+    std::vector<std::vector<int>> commonPoints;
+    for (const auto &p : points1) {
+      if (std::find(points2.begin(), points2.end(), p) != points2.end()) {
+        commonPoints.push_back(p);
+      }
+    }
+    return commonPoints;
+  }
+
+  // Example usage for your specific constraint: S0 < S1 < S2 < Sk
+  void addOrderingConstraints() {
+    for (auto [sId, info] : statementInfos) {
+      for (auto [forOp, bounds] : info.bounds) {
+        if (bounds.first > bounds.second)
+          continue; 
+        auto ivId = std::distance(loops.begin(),
+                                  std::find(loops.begin(), loops.end(), forOp));
+        s.add(getScheduleVar(sId, 1 + 2 * ivId, ivId) == 1);
+      }
+    }
+    addUniversalOrderingConstraint(blasLoad1Id, blasLoad2Id, true);
+    addUniversalOrderingConstraint(blasLoad2Id, blasStoreId, true);
+
+    // Si < Sk for i ∈ {0,1,2}, k ≥ 3
+    for (size_t i = 0; i < std::min(statements.size(), size_t(3)); ++i) {
+      if (i == blasLoad1Id || i == blasLoad2Id || i == blasStoreId)
+        continue;
+      addUniversalOrderingConstraint(blasStoreId, i, true);
+    }
+
+    for (size_t i = 0; i < std::min(statements.size(), size_t(3)); ++i) {
+      if (i == blasLoad1Id || i == blasLoad2Id || i == blasStoreId)
+        continue;
+      addUniversalOrderingConstraint(blasStoreId, i, true);
     }
   }
 
@@ -288,29 +429,30 @@ public:
         if (access1.memref == access2.memref &&
             accessesSameLocation(access1, access2)) {
 
-          // Create iteration domain variables (including constant 1)
-          std::vector<expr> iter1 = {
-              ctx.int_const(("i1_" + std::to_string(i)).c_str()),
-              ctx.int_const(("i2_" + std::to_string(i)).c_str()),
-              ctx.int_const(("i3_" + std::to_string(i)).c_str()),
-              ctx.int_val(1)};
-
-          std::vector<expr> iter2 = {
-              ctx.int_const(("i1_" + std::to_string(j)).c_str()),
-              ctx.int_const(("i2_" + std::to_string(j)).c_str()),
-              ctx.int_const(("i3_" + std::to_string(j)).c_str()),
-              ctx.int_val(1)};
-
           // Add dependence constraint
           if (createsDependence(access1, access2)) {
             llvm::errs() << "Dependence between statements "
                          << access1.statementId << " < " << access2.statementId
                          << "\n";
-            auto schedule1 = computeScheduleVector(access1.statementId, iter1);
-            auto schedule2 = computeScheduleVector(access2.statementId, iter2);
 
-            s.add(lexicographicLess(schedule1, schedule2));
+            addUniversalOrderingConstraint(access1.statementId,
+                                           access2.statementId, true);
           }
+        }
+      }
+    }
+
+    for (int i = 0; i < statements.size(); ++i) {
+      for (int j = 0; j < statements.size(); ++j) {
+        if (i == j)
+          continue;
+
+        // Check if statements[i]'s result or its results' consumer are produced
+        // by j
+        if (compigra::consumesResult(statements[i], statements[j])) {
+          llvm::errs() << "Dependency detected between statements " << i
+                       << " < " << j << "\n";
+          addUniversalOrderingConstraint(i, j, true);
         }
       }
     }
@@ -338,17 +480,18 @@ public:
       for (int row = 0; row < numScheduleDimensions; ++row) {
         for (int col = 0; col < numLoopDimensions; ++col) {
           s.add(getScheduleVar(stmtId, row, col) >= 0);
-          s.add(getScheduleVar(stmtId, row, col) <= 1);
+          if (col < numLoopDimensions - 1)
+            s.add(getScheduleVar(stmtId, row, col) <= 1);
         }
       }
     }
   }
 
   void addRowSumConstraints() {
-    // Ensure that for each statement, the sum of coefficients in each row is at
-    // least 1
+    // Ensure that for each statement, the sum of coefficients in each row is
+    // at least 1
     for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
-      for (int col = 0; col < numLoopDimensions; ++col) {
+      for (int col = 0; col < numLoopDimensions - 1; ++col) {
         expr rowSum = ctx.int_val(0);
         for (int row = 0; row < numScheduleDimensions; ++row) {
           rowSum = rowSum + getScheduleVar(stmtId, row, col);
@@ -358,9 +501,23 @@ public:
     }
   }
 
+  void addColSumConstraints() {
+    // Ensure that for each statement, the sum of coefficients in each row is
+    // at least 1
+    for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
+      for (int row = 1; row < numScheduleDimensions; row += 2) {
+        expr colSum = ctx.int_val(0);
+        for (int col = 0; col < numLoopDimensions; ++col) {
+          colSum = colSum + getScheduleVar(stmtId, row, col);
+        }
+        s.add(colSum <= 1);
+      }
+    }
+  }
+
   void addOptimizationGoal() {
-    // Minimize the sum of absolute values of coefficients in even rows (rows %
-    // 2 == 0)
+    // Minimize the sum of absolute values of coefficients in even rows (rows
+    // % 2 == 0)
     expr objective = ctx.int_val(0);
 
     for (int stmtId = 0; stmtId < numStatements; ++stmtId) {
@@ -369,19 +526,19 @@ public:
           expr coeff = getScheduleVar(stmtId, row, col);
 
           // Add absolute value using auxiliary variables
-          expr absVar =
-              ctx.int_const(("abs_" + std::to_string(stmtId) + "_" +
-                             std::to_string(row) + "_" + std::to_string(col))
-                                .c_str());
+          // expr absVar =
+          //     ctx.int_const(("abs_" + std::to_string(stmtId) + "_" +
+          //                    std::to_string(row) + "_" + std::to_string(col))
+          //                       .c_str());
 
-          // Constraints for absolute value: absVar >= coeff and absVar >=
-          // -coeff
-          s.add(absVar >= coeff);
-          s.add(absVar >= -coeff);
-          s.add(absVar >= 0);
+          // // Constraints for absolute value: absVar >= coeff and absVar >=
+          // // -coeff
+          // s.add(absVar >= coeff);
+          // s.add(absVar >= -coeff);
+          // s.add(absVar >= 0);
 
           // Add to objective
-          objective = objective + absVar;
+          objective = objective + coeff;
         }
       }
     }
@@ -411,6 +568,8 @@ public:
     llvm::errs() << "Bound constraints added\n";
     addRowSumConstraints();
     llvm::errs() << "Column sum constraints added\n";
+    addColSumConstraints();
+    addOptimizationGoal();
 
     std::vector<std::vector<std::vector<int>>> result;
 
@@ -455,12 +614,11 @@ public:
 #endif
 
 // Main function to generate schedule
-std::vector<std::vector<std::vector<int>>>
-generateScheduleFunction(const SetVector<Operation *> &statements,
-                         const SmallVector<Operation *> &blasOps,
-                         int scheduleDimensions) {
+std::vector<std::vector<std::vector<int>>> generateScheduleFunction(
+    affine::AffineForOp &outerFor, const SetVector<Operation *> &statements,
+    const SmallVector<Operation *> &blasOps, int scheduleDimensions) {
 #ifdef HAVE_Z3
-  ScheduleFunctionGenerator generator(statements, scheduleDimensions);
+  ScheduleFunctionGenerator generator(outerFor, statements, scheduleDimensions);
   if (blasOps.size() == 3) {
     generator.setBLASOps(blasOps[0], blasOps[1], blasOps[2]);
   } else {

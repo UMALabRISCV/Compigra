@@ -24,7 +24,6 @@ bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp);
 void getAllStatements(affine::AffineForOp outerFor,
                       SetVector<Operation *> &statements);
 
-std::vector<std::vector<std::vector<int>>>
-generateScheduleFunction(const SetVector<Operation *> &statements,
-                         const SmallVector<Operation *> &blasOps,
-                         int scheduleDimensions = 7);
+std::vector<std::vector<std::vector<int>>> generateScheduleFunction(
+    affine::AffineForOp &outerFor, const SetVector<Operation *> &statements,
+    const SmallVector<Operation *> &blasOps, int scheduleDimensions = 7);

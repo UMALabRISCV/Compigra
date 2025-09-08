@@ -63,6 +63,10 @@ bool isBackEdge(Block *srcBlk, Block *dstBlk);
 
 bool isBackEdge(Operation *srcOp, Operation *dstOp);
 
+/// Returns true if `opj` consumes (directly or transitively) the result(s) of
+/// `opi`.
+bool consumesResult(Operation *opi, Operation *opj);
+
 /// Remove the block arguments if there is only one predecessor of the block
 void removeUselessBlockArg(Region &region, OpBuilder &builder);
 } // namespace compigra
