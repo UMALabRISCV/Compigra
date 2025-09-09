@@ -23,15 +23,17 @@ namespace compigra {
 bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp);
 
 void getAllStatements(affine::AffineForOp outerFor,
-                      SetVector<Operation *> &statements);
+                      SmallVector<SmallVector<Operation *>> &statements);
 
 std::vector<std::vector<std::vector<int>>> generateScheduleFunction(
-    affine::AffineForOp &outerFor, const SetVector<Operation *> &statements,
+    affine::AffineForOp &outerFor,
+    const SmallVector<SmallVector<Operation *>> &statements,
     const SmallVector<Operation *> &blasOps, int scheduleDimensions = 7);
 
 LogicalResult reorderStatements(
     affine::AffineForOp outerFor,
     const std::vector<std::vector<std::vector<int>>> &scheduleMatrix,
-    const SetVector<Operation *> &statements, OpBuilder &builder);
+    const SmallVector<SmallVector<Operation *>> &statements,
+    OpBuilder &builder);
 
 } // namespace compigra

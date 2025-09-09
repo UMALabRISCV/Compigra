@@ -15,6 +15,7 @@
 #include "compigra/Support/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include <numeric>
 
 using namespace mlir;
 using namespace mlir::affine;
@@ -54,12 +55,52 @@ bool compigra::isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp) {
   return false;
 }
 
-void compigra::getAllStatements(affine::AffineForOp outerFor,
-                                SetVector<Operation *> &statements) {
+void compigra::getAllStatements(
+    affine::AffineForOp outerFor,
+    SmallVector<SmallVector<Operation *>> &statements) {
   outerFor.walk([&statements](mlir::Operation *op) {
-    if (isa<affine::AffineLoadOp, affine::AffineStoreOp>(op))
-      statements.insert(op);
+    if (isa<affine::AffineLoadOp, affine::AffineStoreOp>(op)) {
+      SmallVector<Operation *> opList;
+      opList.push_back(op);
+      // insert all arithmatic or constant operations after the load/store
+      auto curOp = op->getNextNode();
+      while (curOp) {
+        // if curOp is a load/store or yield or loop, stop
+        if (isa<affine::AffineLoadOp, affine::AffineStoreOp,
+                affine::AffineYieldOp, affine::AffineForOp>(curOp)) {
+          break;
+        }
+        opList.push_back(curOp);
+        curOp = curOp->getNextNode();
+      }
+
+      statements.push_back(opList);
+    }
   });
+}
+
+int getStatementLevel(AffineForOp rootFor, Operation *op) {
+  auto forOp = dyn_cast<AffineForOp>(op->getParentOp());
+  int level = 1;
+  auto curBlock = forOp->getBlock();
+  // Find all enclosing loops and their bounds
+  while (curBlock && curBlock != rootFor->getBlock()) {
+    level++;
+    curBlock =
+        curBlock->getParentOp() ? curBlock->getParentOp()->getBlock() : nullptr;
+  }
+  return level;
+}
+
+bool isProducer(Operation *producer, Operation *consumer) {
+  for (Value result : producer->getResults()) {
+    for (Value operand : consumer->getOperands()) {
+      if (result == operand) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 #ifdef HAVE_Z3
@@ -91,6 +132,7 @@ private:
   // Ordered index of the loop iterators
   SmallVector<AffineForOp, 4> loops;
   DenseMap<int, StatementInfo> statementInfos;
+  SmallVector<SmallVector<Operation *>> stmts;
 
   Operation *blasLoad1, *blasLoad2, *blasStore;
   int blasLoad1Id, blasLoad2Id, blasStoreId;
@@ -105,9 +147,9 @@ private:
 
 public:
   ScheduleFunctionGenerator(AffineForOp rootLoop,
-                            const SetVector<Operation *> &stmts,
+                            const SmallVector<SmallVector<Operation *>> &stmts,
                             int scheduleDims = 2)
-      : rootLoop(rootLoop), s(ctx), numStatements(stmts.size()),
+      : rootLoop(rootLoop), stmts(stmts), s(ctx), numStatements(stmts.size()),
         numScheduleDimensions(scheduleDims), numLoopDimensions(4) {
     DenseMap<Operation *, std::pair<int, int>> bounds;
     rootLoop.walk([&](AffineForOp forOp) {
@@ -123,8 +165,9 @@ public:
       loops.insert(loops.begin(), forOp);
     });
 
-    // Convert SetVector to std::vector
-    for (Operation *op : stmts) {
+    // get the load and store operations and their statement ids
+    for (auto opList : stmts) {
+      auto op = opList[0];
       StatementInfo info;
 
       auto curBlock = op->getBlock();
@@ -233,9 +276,6 @@ public:
     blasLoad1Id = getStatementId(blasLoad1);
     blasLoad2Id = getStatementId(blasLoad2);
     blasStoreId = getStatementId(blasStore);
-    llvm::errs() << "BLAS Load1 ID: " << blasLoad1Id << "\n";
-    llvm::errs() << "BLAS Load2 ID: " << blasLoad2Id << "\n";
-    llvm::errs() << "BLAS Store ID: " << blasStoreId << "\n";
   }
 
   expr getScheduleVar(int stmtId, int row, int col) {
@@ -376,6 +416,7 @@ public:
 
   // Example usage for your specific constraint: S0 < S1 < S2 < Sk
   void addOrderingConstraints() {
+    // keep iterative order
     for (auto [sId, info] : statementInfos) {
       for (auto [forOp, bounds] : info.bounds) {
         if (bounds.first > bounds.second)
@@ -384,8 +425,11 @@ public:
                                   std::find(loops.begin(), loops.end(), forOp));
         s.add(getScheduleVar(sId, 1 + 2 * ivId, ivId) == 1);
       }
+      int loopLevel = getStatementLevel(rootLoop, info.op);
+      for (auto dim = 2; dim < loopLevel * 2; dim += 2)
+        s.add(getScheduleVar(sId, dim, numLoopDimensions - 1) == 0);
     }
-    addUniversalOrderingConstraint(blasLoad1Id, blasLoad2Id, true);
+    addUniversalOrderingConstraint(blasLoad1Id, blasLoad2Id, false);
     addUniversalOrderingConstraint(blasLoad2Id, blasStoreId, true);
 
     // Si < Sk for i ∈ {0,1,2}, k ≥ 3
@@ -409,7 +453,7 @@ public:
       if (k == blasLoad1Id || k == blasLoad2Id || k == blasStoreId)
         s.add(getScheduleVar(k, 0, lastD) == 0);
       else
-        s.add(getScheduleVar(k, 0, lastD) >= 1);
+        s.add(getScheduleVar(k, 0, lastD) == 1);
     }
   }
 
@@ -423,31 +467,11 @@ public:
         // Check if accessing the same memory location
         if (access1.memref == access2.memref &&
             accessesSameLocation(access1, access2)) {
-
           // Add dependence constraint
           if (createsDependence(access1, access2)) {
-            llvm::errs() << "Dependence between statements "
-                         << access1.statementId << " < " << access2.statementId
-                         << "\n";
-
             addUniversalOrderingConstraint(access1.statementId,
                                            access2.statementId, true);
           }
-        }
-      }
-    }
-
-    for (int i = 0; i < statements.size(); ++i) {
-      for (int j = 0; j < statements.size(); ++j) {
-        if (i == j)
-          continue;
-
-        // Check if statements[i]'s result or its results' consumer are produced
-        // by j
-        if (compigra::consumesResult(statements[i], statements[j])) {
-          llvm::errs() << "Dependency detected between statements " << i
-                       << " < " << j << "\n";
-          addUniversalOrderingConstraint(i, j, true);
         }
       }
     }
@@ -539,20 +563,42 @@ public:
     }
   }
 
+  void addDominanceConstraints() {
+    for (int i = 0; i < stmts.size(); i++) {
+      for (int j = 0; j < stmts.size(); j++) {
+        if (i == j)
+          continue;
+        auto group1 = stmts[i];
+        auto group2 = stmts[j];
+        // if one of the operations is the producer of a value consumed by one
+        // of the operations in the other group, then add dominance constraint
+        bool existsDependency = false;
+        for (auto op1 : group1)
+          for (auto op2 : group2) {
+            if (isProducer(op1, op2)) {
+              existsDependency = true;
+              break;
+            }
+            if (existsDependency)
+              break;
+          }
+
+        if (existsDependency)
+          addUniversalOrderingConstraint(i, j, true);
+      }
+    }
+  }
+
   std::vector<std::vector<std::vector<int>>> generateSchedule() {
     // Add all constraints
     addOrderingConstraints();
-    llvm::errs() << "Ordering constraints added\n";
     addSplitConstraints();
-    llvm::errs() << "Split constraints added\n";
     addMemoryConsistencyConstraints();
-    llvm::errs() << "Memory consistency constraints added\n";
     addBoundConstraints();
-    llvm::errs() << "Bound constraints added\n";
     addRowSumConstraints();
-    llvm::errs() << "Column sum constraints added\n";
     addColSumConstraints();
     addOptimizationGoal();
+    addDominanceConstraints();
 
     std::vector<std::vector<std::vector<int>>> result;
 
@@ -598,7 +644,8 @@ public:
 
 // Main function to generate schedule
 std::vector<std::vector<std::vector<int>>> compigra::generateScheduleFunction(
-    affine::AffineForOp &outerFor, const SetVector<Operation *> &statements,
+    affine::AffineForOp &outerFor,
+    const SmallVector<SmallVector<Operation *>> &statements,
     const SmallVector<Operation *> &blasOps, int scheduleDimensions) {
 #ifdef HAVE_Z3
   ScheduleFunctionGenerator generator(outerFor, statements, scheduleDimensions);
@@ -626,17 +673,11 @@ createLoopBasedOnSibling(const std::vector<int> &targetKey,
   AffineForOp templateLoop = nullptr;
 
   if (targetKey.size() > 0) {
-    // Look for the first existing sibling (same parent, lower index)
-    for (int i = targetKey.back() - 1; i >= 0; i--) {
-      std::vector<int> siblingKey = targetKey;
-      siblingKey.back() = i; // Replace last element with i
-
-      auto it = loopMap.find(siblingKey);
-      if (it != loopMap.end()) {
-        templateLoop = it->second;
-        break;
-      }
-    }
+    std::vector<int> siblingKey;
+    for (auto k : targetKey)
+      siblingKey.push_back(0);
+    auto it = loopMap.find(siblingKey);
+    templateLoop = (it != loopMap.end()) ? it->second : nullptr;
   }
 
   if (!templateLoop)
@@ -724,6 +765,8 @@ LogicalResult insertLoopByKey(const std::vector<int> &targetKey,
     // Create the new loop
     AffineForOp newLoop = createLoopBasedOnSibling(key, loopMap, builder, loc);
     loopMap[key] = newLoop;
+    if (!newLoop)
+      return failure();
 
     return success();
   };
@@ -738,43 +781,60 @@ bool isLexicographicallySmaller(const std::vector<int> &a,
   return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
 }
 
-// Helper function to check if an operation is within the given affine for loop
-bool isInSameLoop(Operation *op, affine::AffineForOp forLoop) {
-  Operation *parent = op->getParentOp();
-  while (parent) {
-    if (parent == forLoop.getOperation()) {
-      return true;
-    }
-    parent = parent->getParentOp();
-  }
-  return false;
-}
-
-// Main function to insert operation into affine for loop with lexicographical
-// ordering
-void insertToAffineFor(affine::AffineForOp loop, Operation *insertOp,
+void insertToAffineFor(affine::AffineForOp loop,
+                       SmallVector<Operation *> insertOps,
                        std::map<Operation *, std::vector<int>> stmtPriority) {
 
-  // Check if the operation to insert has a priority
-  if (stmtPriority.find(insertOp) == stmtPriority.end()) {
-    // If no priority specified, insert at the end
-    insertOp->moveBefore(loop.getBody()->getTerminator());
+  // Handle empty case
+  if (insertOps.empty()) {
     return;
   }
 
-  std::vector<int> insertPriority = stmtPriority[insertOp];
+  // Get the priority for the first operation (all operations are treated as
+  // having the same priority)
+  std::vector<int> insertPriority;
+  bool hasPriority = false;
+
+  // Find the first operation that has a priority
+  for (Operation *op : insertOps) {
+    if (stmtPriority.find(op) != stmtPriority.end()) {
+      insertPriority = stmtPriority[op];
+      hasPriority = true;
+      break;
+    }
+  }
+
+  // If no operation has a priority, insert all at the end maintaining their
+  // order
+  if (!hasPriority) {
+    Operation *terminator = loop.getBody()->getTerminator();
+    for (Operation *op : insertOps) {
+      op->moveBefore(terminator);
+    }
+    return;
+  }
 
   // Collect all operations in the same loop that have priorities
   std::vector<std::pair<Operation *, std::vector<int>>> opsInLoop;
 
   // Walk through all operations in the loop body
-  loop.getBody()->walk([&](Operation *op) {
-    if (op != loop.getBody()->getTerminator() && // Skip terminator
-        op != insertOp && // Skip the operation we're inserting
-        stmtPriority.find(op) != stmtPriority.end()) {
-      opsInLoop.push_back({op, stmtPriority[op]});
+  for (auto &op : loop.getOps()) {
+    if (&op == loop.getBody()->getTerminator() && // Skip terminator
+        stmtPriority.find(&op) == stmtPriority.end())
+      continue;
+
+    bool isInInsertOps = false;
+    for (Operation *insertOp : insertOps) {
+      if (&op == insertOp) {
+        isInInsertOps = true;
+        break;
+      }
     }
-  });
+
+    if (!isInInsertOps) {
+      opsInLoop.push_back({&op, stmtPriority[&op]});
+    }
+  }
 
   // Sort operations by their lexicographical priority
   std::sort(opsInLoop.begin(), opsInLoop.end(),
@@ -790,26 +850,32 @@ void insertToAffineFor(affine::AffineForOp loop, Operation *insertOp,
     const std::vector<int> &priority = pair.second;
 
     // If the current operation has a higher priority (lexicographically larger)
-    // than our insert operation, we should insert before it
+    // than our insert operations, we should insert before it
     if (isLexicographicallySmaller(insertPriority, priority)) {
       insertBefore = op;
       break;
     }
   }
 
-  // Insert the operation at the determined position
+  // Insert all operations at the determined position, maintaining their order
   if (insertBefore) {
-    insertOp->moveBefore(insertBefore);
+    // Insert in reverse order so the final order matches insertOps
+    for (Operation *op : insertOps) {
+      op->moveBefore(insertBefore);
+    }
   } else {
     // Insert before the terminator (at the end of meaningful operations)
-    insertOp->moveBefore(loop.getBody()->getTerminator());
+    Operation *terminator = loop.getBody()->getTerminator();
+    for (Operation *op : insertOps)
+      op->moveBefore(terminator);
   }
 }
 
 LogicalResult compigra::reorderStatements(
     affine::AffineForOp outerFor,
     const std::vector<std::vector<std::vector<int>>> &scheduleMatrix,
-    const SetVector<Operation *> &statements, OpBuilder &builder) {
+    const SmallVector<SmallVector<Operation *>> &statements,
+    OpBuilder &builder) {
   if (scheduleMatrix.empty() || scheduleMatrix[0].empty())
     return success();
   std::map<std::vector<int>, AffineForOp> loopMap;
@@ -849,50 +915,52 @@ LogicalResult compigra::reorderStatements(
       stack.push_back({childLoops[i], childKey});
     }
   }
-  llvm::errs() << "Existing loops found: " << loopMap.size() << "\n";
-
-  auto getStatementLevel = [&](Operation *op) {
-    auto forOp = dyn_cast<AffineForOp>(op->getParentOp());
-    int level = 1;
-    auto curBlock = forOp->getBlock();
-    // Find all enclosing loops and their bounds
-    while (curBlock && curBlock != outerFor->getBlock()) {
-      level++;
-      curBlock = curBlock->getParentOp() ? curBlock->getParentOp()->getBlock()
-                                         : nullptr;
-    }
-    return level;
-  };
 
   auto ivDim = scheduleMatrix[0][0].size();
   // create new loops according to scheduleMatrix
   for (int i = 0; i < scheduleMatrix.size(); i++) {
-    auto stmt = statements[i];
+    auto stmt = statements[i][0];
     auto scheduleM = scheduleMatrix[i];
 
-    auto loopLevels = getStatementLevel(dyn_cast<AffineForOp>(stmt));
+    auto loopLevels = getStatementLevel(outerFor, stmt);
     std::vector<int> priority;
     for (size_t row = 2 * loopLevels; row < scheduleM.size(); ++row) {
       priority.push_back(scheduleM[row][ivDim - 1]);
     }
-    stmtPriority[stmt] = priority;
+    for (auto s : statements[i])
+      stmtPriority[s] = priority;
 
-    std::vector<int> key;
+    std::vector<int> iterKey;
     for (auto level = 0; level < loopLevels; level++) {
-      key.push_back(scheduleMatrix[i][2 * level][ivDim - 1]);
+      iterKey.push_back(scheduleMatrix[i][2 * level][ivDim - 1]);
     }
-    if (loopMap.find(key) != loopMap.end()) {
-      // loop already exists
-      continue;
+
+    if (loopMap.find(iterKey) == loopMap.end()) {
+      if (failed(insertLoopByKey(iterKey, loopMap, builder)))
+        return failure();
     }
     // create new loops
-    if (failed(insertLoopByKey(key, loopMap, builder)))
-      return failure();
 
-    auto loop = loopMap[key];
-    // move the statement into the scope of
-    stmt->moveBefore(loop.getBody(), loop.getBody()->end());
-    insertToAffineFor(loop, stmt, stmtPriority);
+    auto loop = loopMap[iterKey];
+    // move the statement into the scope
+    insertToAffineFor(loop, statements[i], stmtPriority);
+
+    for (int bit = 1; bit <= iterKey.size(); bit++) {
+      std::vector<int> loopHierarchy(iterKey.begin(), iterKey.begin() + bit);
+      std::vector<int> origHierachy(bit, 0);
+      // if loopHierarchy equals to origHierachy, no need to replace iv
+      if (loopHierarchy == origHierachy)
+        continue;
+
+      auto origFor = loopMap[origHierachy];
+      auto nestFor = loopMap[loopHierarchy];
+      for (auto s : statements[i]) {
+        // replace the operations' iv with the new loop's iv
+        for (auto operand : s->getOperands())
+          if (operand == origFor.getInductionVar())
+            s->replaceUsesOfWith(operand, nestFor.getInductionVar());
+      }
+    }
   }
 
   return success();

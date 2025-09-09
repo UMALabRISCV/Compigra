@@ -254,7 +254,6 @@ struct AffineScalarizeStorePass
       signalPassFailure();
     // print current modOp operation
     auto modOp = getOperation();
-    llvm::errs() << *modOp << "\n";
   }
 };
 
