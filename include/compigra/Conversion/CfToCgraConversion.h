@@ -26,10 +26,11 @@ namespace compigra {
 #define GEN_PASS_DECL_CFTOCGRACONVERSION
 #include "compigra/Conversion/Passes.h.inc"
 
-void populateCfToCgraConversionPatterns(
-    RewritePatternSet &patterns, DenseMap<int, Operation *> &baseAddrs,
-    DenseMap<llvm::StringRef, Operation *> &globalConstAddrs,
-    DenseMap<Operation *, SmallVector<Operation *>> &strideValMap);
+// void populateCfToCgraConversionPatterns(
+//     RewritePatternSet &patterns, DenseMap<int, Operation *> &baseAddrs,
+//     DenseMap<llvm::StringRef, Operation *> &globalConstAddrs,
+//     DenseMap<Operation *, Operation *> &allocAddrs,
+//     DenseMap<Operation *, SmallVector<Operation *>> &strideValMap);
 
 std::unique_ptr<mlir::Pass> createCfToCgraConversion();
 } // namespace compigra
