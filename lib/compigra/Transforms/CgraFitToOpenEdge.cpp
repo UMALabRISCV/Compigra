@@ -213,9 +213,9 @@ OpenEdgeISATarget::OpenEdgeISATarget(MLIRContext *ctx)
 
 Operation *existConstantOp(int intVal, SmallVector<Operation *> &insertedOps) {
   for (auto &op : insertedOps) {
-    if (!op->getAttrDictionary().contains("constant"))
+    if (!op->getAttrDictionary().contains("value"))
       continue;
-    auto produceVal = op->getAttr("constant").dyn_cast<IntegerAttr>().getInt();
+    auto produceVal = op->getAttr("value").dyn_cast<IntegerAttr>().getInt();
     if (produceVal == intVal) {
       return op;
     }
@@ -330,7 +330,7 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
   midBits =
       rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
                                      midBitVal.getResult(), zeroOp.getResult());
-  midBits->setAttr("constant", rewriter.getI32IntegerAttr(part1));
+  midBits->setAttr("value", rewriter.getI32IntegerAttr(part1));
 
   int shiftVal = part1 << 12;
   arith::ShLIOp shiftOp1;
@@ -339,7 +339,7 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
   shiftOp1 = rewriter.create<arith::ShLIOp>(loc, constOp.getResult().getType(),
                                             midBits->getResult(0),
                                             shiftImm1.getResult());
-  shiftOp1->setAttr("constant", rewriter.getI32IntegerAttr(shiftVal));
+  shiftOp1->setAttr("value", rewriter.getI32IntegerAttr(shiftVal));
 
   int addVal = part0 + (part1 << 12);
   arith::AddIOp addOp;
@@ -347,13 +347,14 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
   addOp = rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
                                          lowerBits.getResult(),
                                          shiftOp1.getResult());
-  addOp->setAttr("constant", rewriter.getI32IntegerAttr(valAttr));
+  addOp->setAttr("value", rewriter.getI32IntegerAttr(valAttr));
 
   // If the higher bits are zero
   if (!(mask2 & valAttr)) {
     rewriter.replaceUsesWithIf(
         constOp, addOp.getResult(),
         [&](OpOperand &operand) { return operand.getOwner() != addOp; });
+    // addOp->setAttrs(constOp->getAttrs());
     return addOp;
   }
 
@@ -368,7 +369,7 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
   highBits = rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
                                             highBitVal.getResult(),
                                             zeroOp2.getResult());
-  highBits->setAttr("constant", rewriter.getI32IntegerAttr(part2));
+  highBits->setAttr("value", rewriter.getI32IntegerAttr(part2));
 
   arith::ShLIOp shiftOp2;
   int shiftVal2 = part2 << 24;
@@ -377,12 +378,13 @@ Operation *generateValidConstant(arith::ConstantOp constOp,
   shiftOp2 = rewriter.create<arith::ShLIOp>(loc, constOp.getResult().getType(),
                                             highBits->getResult(0),
                                             shiftImm2.getResult());
-  shiftOp2->setAttr("constant", rewriter.getI32IntegerAttr(shiftVal2));
+  shiftOp2->setAttr("value", rewriter.getI32IntegerAttr(shiftVal2));
   auto sumOp =
       rewriter.create<arith::AddIOp>(loc, constOp.getResult().getType(),
                                      addOp.getResult(), shiftOp2.getResult());
 
-  sumOp->setAttr("constant", rewriter.getI32IntegerAttr(valAttr));
+  sumOp->setAttrs(constOp->getAttrs());
+  sumOp->setAttr("value", rewriter.getI32IntegerAttr(valAttr));
   rewriter.replaceUsesWithIf(
       constOp, sumOp.getResult(),
       [&](OpOperand &operand) { return operand.getOwner() != sumOp; });
@@ -510,7 +512,7 @@ static void raiseCstOpGenOutLoop(func::FuncOp funcOp) {
 
     for (auto &op : llvm::make_early_inc_range(blk.getOperations())) {
       // check whether the op has attribute "constant"
-      if (!op.getAttr("constant"))
+      if (!op.getAttr("value"))
         continue;
 
       // get the comman predeccessor block
@@ -566,7 +568,7 @@ arith::AddIOp generateImmAddOp(arith::ConstantOp constOp, Operation *user,
   auto addOp = rewriter.create<arith::AddIOp>(
       loc, constOp.getType(), zeroConst.getResult(), immConst.getResult());
   // set the imm attribute of the operation
-  addOp->setAttr("constant", intAttr);
+  addOp->setAttrs(constOp->getAttrs());
   return addOp;
 }
 
@@ -713,54 +715,47 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
   for (auto &blk : region.getBlocks()) {
     bool hasGemmBlas = false;
     auto &firstOp = blk.getOperations().front();
-    if (isa<cgra::BlasGemmOp>(firstOp))
+    if (isa<cgra::BlasGemmAsmOp>(firstOp))
       hasGemmBlas = true;
     if (!hasGemmBlas)
       continue;
 
-    // push all the live-in values to memory
+    // push all the live-outs values to memory
     for (auto val : liveIns[&blk]) {
       // if the value is used by the gemm_blas operation, skip it
       if (llvm::is_contained(firstOp.getOperands(), val))
         continue;
 
-      auto defOp = val.getDefiningOp();
-      if (!defOp) {
-        auto predBlk = val.getParentBlock();
-        builder.setInsertionPoint(predBlk->getTerminator());
-      } else {
-        auto prodBlk = defOp->getBlock();
-        builder.setInsertionPoint(prodBlk->getTerminator());
-      }
+      auto initBlk = *blk.getPredecessors().begin();
+      auto finiBlk = *blk.getSuccessors().begin();
 
+      builder.setInsertionPoint(initBlk->getTerminator());
       auto addrCst = builder.create<arith::ConstantOp>(
           blk.getTerminator()->getLoc(), builder.getI32Type(),
           builder.getI32IntegerAttr(baseAddr));
-      builder.create<cgra::SwiOp>(blk.getTerminator()->getLoc(), val,
+      builder.create<cgra::SwiOp>(initBlk->getTerminator()->getLoc(), val,
                                   addrCst.getResult());
 
-      // load the value from memory in the block
-      DenseMap<Block *, Operation *> loadOps;
-      for (auto user : llvm::make_early_inc_range(val.getUsers())) {
-        if (user->getBlock() == val.getParentBlock() ||
-            loadOps.count(user->getBlock()))
-          continue;
+      builder.setInsertionPointToStart(finiBlk);
+      auto addrCstlwd = builder.create<arith::ConstantOp>(
+          blk.getTerminator()->getLoc(), builder.getI32Type(),
+          builder.getI32IntegerAttr(baseAddr));
+      auto lwiOp =
+          builder.create<cgra::LwiOp>(finiBlk->getTerminator()->getLoc(),
+                                      val.getType(), addrCstlwd.getResult());
 
-        builder.setInsertionPointToStart(user->getBlock());
-        auto addrCst = builder.create<arith::ConstantOp>(
-            blk.getTerminator()->getLoc(), builder.getI32Type(),
-            builder.getI32IntegerAttr(baseAddr));
+      val.replaceUsesWithIf(lwiOp.getResult(), [&](OpOperand &operand) {
+        auto userBlk = operand.getOwner()->getBlock();
+        if (operand.getOwner()->getBlock() == val.getParentBlock())
+          return false;
+        auto propPath = getBlockPath(initBlk, userBlk);
+        return !propPath.empty();
+      });
 
-        auto lwiOp = builder.create<cgra::LwiOp>(user->getLoc(), val.getType(),
-                                                 addrCst.getResult());
-        loadOps[user->getBlock()] = lwiOp;
-        //  replace the use of val for the users in this block
-        val.replaceUsesWithIf(lwiOp.getResult(), [&](OpOperand &operand) {
-          return operand.getOwner()->getBlock() == user->getBlock();
-        });
-      }
       baseAddr += 4;
     }
+    if (hasGemmBlas)
+      computeLiveValue(region, liveIns, liveOuts);
   }
 }
 
@@ -832,6 +827,7 @@ void CgraFitToOpenEdgePass::runOnOperation() {
         return signalPassFailure();
     }
   }
+  llvm::errs() << funcOp << "\n";
 }
 
 namespace compigra {

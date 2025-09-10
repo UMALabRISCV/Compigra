@@ -396,7 +396,7 @@ void calculateTemporalSpatialSchedule(
     int bbStart = INT32_MAX;
 
     Operation *blasKernel = &block.getOperations().front();
-    if (isa<cgra::BlasGemmOp>(blasKernel)) {
+    if (isa<cgra::BlasGemmAsmOp>(blasKernel)) {
       solution[blasKernel] = {(int)kernelTime, 0};
       kernelTime += blasKernelLatency;
       continue;
@@ -728,7 +728,7 @@ static LogicalResult preScheduleWithExternalSupport(
   for (auto &blk : llvm::make_early_inc_range(funcOp.getBlocks())) {
     bbInd++;
     // check whether the block can be compiled using blas
-    if (isa<cgra::BlasGemmOp>(blk.getOperations().front())) {
+    if (isa<cgra::BlasGemmAsmOp>(blk.getOperations().front())) {
       preScheduledBlks.push_back(&blk);
       continue;
     }

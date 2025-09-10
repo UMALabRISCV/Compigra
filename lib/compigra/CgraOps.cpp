@@ -393,26 +393,6 @@ LogicalResult MergeOp::verify() {
   return success();
 }
 
-ParseResult JumpOp::parse(OpAsmParser &parser, OperationState &result) {
-  SmallVector<OpAsmParser::UnresolvedOperand, 4> allOperands;
-  Type type;
-  ArrayRef<Type> operandTypes(type);
-  SmallVector<Type, 1> dataOperandsTypes;
-  llvm::SMLoc allOperandLoc = parser.getCurrentLocation();
-  int size;
-  if (parseSostOperation(parser, allOperands, result, size, type, false))
-    return failure();
-
-  dataOperandsTypes.assign(size, type);
-  result.addTypes({type});
-  if (parser.resolveOperands(allOperands, dataOperandsTypes, allOperandLoc,
-                             result.operands))
-    return failure();
-  return success();
-}
-
-void JumpOp::print(OpAsmPrinter &p) { sostPrint(p, false); }
-
 bool ConditionalBranchOp::isControl() { return true; }
 
 LogicalResult ConditionalBranchOp::verify() {

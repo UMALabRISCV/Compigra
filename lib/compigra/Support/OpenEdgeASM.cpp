@@ -863,7 +863,7 @@ std::string OpenEdgeASMGen::printInstructionToISA(Operation *op,
   // If it is return, return EXIT
   if (isa<LLVM::ReturnOp, func::ReturnOp>(op))
     return "EXIT";
-  if (isa<cgra::BlasGemmOp>(op))
+  if (isa<cgra::BlasGemmAsmOp>(op))
     return "";
 
   // Drop the dialect prefix
@@ -1011,7 +1011,7 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
   int timeShift = 0;
   for (int t = startT; t <= endTime; t++) {
     auto ops = getOperationsAtTime(t);
-    if (ops.count(0) && isa<cgra::BlasGemmOp>(ops.at(0))) {
+    if (ops.count(0) && isa<cgra::BlasGemmAsmOp>(ops.at(0))) {
       // In the next 27 time steps, there will be BLAS kernel execution
       t += blasLatency;
       continue;
@@ -1040,7 +1040,7 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
     if (ops.empty())
       continue;
 
-    if (ops.count(0) && isa<cgra::BlasGemmOp>(ops.at(0))) {
+    if (ops.count(0) && isa<cgra::BlasGemmAsmOp>(ops.at(0))) {
       ASMGenBLAS asmSchedule(t);
       auto blasCode = asmSchedule.generatePreCompileCode();
       asmCode.insert(asmCode.end(), blasCode.begin(), blasCode.end());

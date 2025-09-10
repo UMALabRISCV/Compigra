@@ -2286,7 +2286,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
 
     // simulated annealing to create a loop that get random
     // placement, record status, cost and determine the final placement
-    int iterSA = 200;
+    int iterSA = 100;
     std::vector<double> lastThreeCosts;
     double previousCost = bestCost;
 

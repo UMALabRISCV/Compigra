@@ -775,7 +775,7 @@ getBLASArguments(cgra::BlasGemmOp op, SmallVector<Value> &newOperands,
 
     if (memrefType.getRank() == 2) {
       if (auto blockArg = dyn_cast_or_null<BlockArgument>(operand)) {
-        builder.setInsertionPointToStart(&funcOp.getBlocks().front());
+        builder.setInsertionPoint(op);
         auto baseOp =
             builder.create<cgra::LwdOp>(op.getLoc(), builder.getI32Type());
         baseOp->setAttr("BaseAddr",
@@ -869,6 +869,11 @@ static void connectPredecessorToInitBlk(SmallVector<mlir::Block *> predecessors,
         condBrOp->setSuccessor(initBlk, 1);
       }
     }
+    // Handle blas incremental PC jump
+    else if (auto blasAsmOp = dyn_cast<cgra::BlasGemmAsmOp>(terminator)) {
+      // Change destination from sucBlk to initBlk
+      blasAsmOp->setSuccessor(initBlk, 0);
+    }
   }
 }
 
@@ -878,7 +883,7 @@ transformkernelBLAS(func::FuncOp funcOp,
                     OpBuilder &builder) {
   // if find a blas gemm operation, create a new block for it
   SmallVector<cgra::BlasGemmOp> blasOps;
-  for (auto op : funcOp.getOps<cgra::BlasGemmOp>()) {
+  for (auto [ind, op] : llvm::enumerate(funcOp.getOps<cgra::BlasGemmOp>())) {
     // revise the operands of op
     // get the subview operation
     SmallVector<memref::SubViewOp> subviewOps;
@@ -892,6 +897,13 @@ transformkernelBLAS(func::FuncOp funcOp,
     SmallVector<Value> newOperands;
     if (failed(getBLASArguments(op, newOperands, allocAddrs, builder, funcOp)))
       return failure();
+
+    // set attributes for the blas arguments
+    for (auto [oprId, operand] : llvm::enumerate(newOperands)) {
+      auto defOp = operand.getDefiningOp();
+      defOp->setAttr("blas", builder.getStringAttr(std::to_string(ind)));
+      defOp->setAttr("blas_arg", builder.getStringAttr(std::to_string(oprId)));
+    }
 
     // Update the operation with new operands
     op->setOperands(newOperands);
@@ -907,7 +919,8 @@ transformkernelBLAS(func::FuncOp funcOp,
     return success();
 
   // create sequential CFG for the blas gemm operation
-  for (auto blasOp : blasOps) {
+  for (auto [ind, blasOp] : llvm::enumerate(blasOps)) {
+
     auto finiBlk = blasOp->getBlock();
     builder.setInsertionPoint(blasOp);
     auto initArg = finiBlk->getArguments();
@@ -933,18 +946,20 @@ transformkernelBLAS(func::FuncOp funcOp,
     builder.setInsertionPointToEnd(initBlk);
     builder.create<cf::BranchOp>(blasOp->getLoc(), blasBlk);
 
+    builder.setInsertionPointToStart(blasBlk);
+    auto asmBLASOp =
+        builder.create<cgra::BlasGemmAsmOp>(blasOp.getLoc(), finiBlk);
+    asmBLASOp->setAttr("blas", builder.getStringAttr(std::to_string(ind)));
+
     for (auto &op : llvm::make_early_inc_range(finiBlk->getOperations())) {
       if (&op == blasOp)
         break;
       op.moveBefore(initBlk->getTerminator());
     }
-
-    // add a jump operation from blasBlk to finiBlk
-    builder.setInsertionPointToEnd(blasBlk);
-    builder.create<cf::BranchOp>(blasOp->getLoc(), finiBlk);
-    // move cgra.BlasGemmOp to blasBlk
-    blasOp->moveBefore(blasBlk->getTerminator());
+    // remove the original blas operation
+    blasOp.erase();
   }
+
   return success();
 }
 

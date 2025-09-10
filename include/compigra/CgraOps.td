@@ -157,6 +157,18 @@ def BlasGemmOp : Cgra_Op<"gemm_blas", [MemoryEffectsOpInterface, IsolatedFromAbo
   }];
 }
 
+def BlasGemmAsmOp : Cgra_Op<"gemm_blas_asm", [
+  Pure, Terminator,
+]> {
+  let summary = "Direct assembly generation operation";
+  let description = [{
+    The operation would directly generate assembly code with the pre-compiled
+    gemm kernel.
+  }];
+  let successors = (successor AnySuccessor : $Dest);
+}
+
+
 
 def MergeOp : Cgra_Op<"merge", [
   Pure, MergeLikeOpInterface, SOSTInterface, SameOperandsAndResultType
@@ -181,28 +193,6 @@ def MergeOp : Cgra_Op<"merge", [
   let hasVerifier = 1;
 }
 
-def JumpOp : Cgra_Op<"jump", [
-  Pure, SameOperandsAndResultType,
-  DeclareOpInterfaceMethods<SOSTInterface, ["sostIsControl"]>,
-  // DeclareOpInterfaceMethods<ExecutableOpInterface>,
-  // DeclareOpInterfaceMethods<GeneralOpInterface>,
-  AllTypesMatch<["dataOperand", "dataResult"]>
-]> {
-  let summary = "Jump operation";
-  let description = [{
-    The jump operation represents an unconditional
-        branch.The single data input is propagated to the single successor
-            .The input must be triggered by some predecessor to avoid continous
-                triggering of a successor block.
-
-    Example:
-      ```mlir % 1 = jump % 0: i32
-      ```
-  }];
-  let arguments = (ins AnyType : $dataOperand);
-  let results = (outs AnyType : $dataResult);
-  let hasCustomAssemblyFormat = 1;
-}
 
 def ConditionalBranchOp : Cgra_Op<"cond_br", [
   Pure, Terminator, AttrSizedOperandSegments,
