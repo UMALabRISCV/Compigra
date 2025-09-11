@@ -388,7 +388,7 @@ void updateGlobalValPlacement(
 void calculateTemporalSpatialSchedule(
     Region &region,
     std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
-    const std::string fileName, int blasKernelLatency = 27) {
+    const std::string fileName, DenseMap<Operation *, int> &blasLatency) {
   unsigned kernelTime = 0;
   for (auto &block : region.getBlocks()) {
     int alignStartTime = kernelTime;
@@ -398,7 +398,7 @@ void calculateTemporalSpatialSchedule(
     Operation *blasKernel = &block.getOperations().front();
     if (isa<cgra::BlasGemmAsmOp>(blasKernel)) {
       solution[blasKernel] = {(int)kernelTime, 0};
-      kernelTime += blasKernelLatency;
+      kernelTime += blasLatency[blasKernel];
       continue;
     }
 
@@ -985,14 +985,24 @@ struct FastASMGenTemporalCGRAPass
       //   break;
     }
 
-    // organize the rawSolution to a final solution
-    int latencyBLAS = 27;
-    calculateTemporalSpatialSchedule(
-        region, rawSolution, "space_temporal_assignment.csv", latencyBLAS);
     // perform register allocation
     OpenEdgeASMGen asmGen(region, maxReg, nRow);
+    // organize the rawSolution to a final solution
+    DenseMap<Operation *, int> blasLatency;
+    for (auto blasOp : funcOp.getOps<cgra::BlasGemmAsmOp>()) {
+      int latencyCC = 27;
+      if (blasOp->getAttr("mulASM"))
+        latencyCC++;
+      if (blasOp->getAttr("addASM"))
+        latencyCC++;
+      asmGen.setBlasKernelLatency(blasOp, latencyCC);
+      blasLatency[blasOp] = latencyCC;
+      llvm::errs() << blasOp << " latency: " << latencyCC << "\n";
+    }
+    calculateTemporalSpatialSchedule(
+        region, rawSolution, "space_temporal_assignment.csv", blasLatency);
+
     asmGen.setSolution(rawSolution);
-    asmGen.setLatencyBLAS(latencyBLAS);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();

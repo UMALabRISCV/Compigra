@@ -25,6 +25,10 @@ void computeLiveValue(Region &region,
                       std::map<Block *, SetVector<Value>> &liveIns,
                       std::map<Block *, SetVector<Value>> &liveOuts);
 
+void computeLiveValueWithLargeCst(
+    Region &region, std::map<Block *, SetVector<Value>> &liveIns,
+    std::map<Block *, SetVector<Value>> &liveOuts);
+
 namespace compigra {
 enum ScheduleStrategy {
   // The schedule strategy is used to determine the order of the operations

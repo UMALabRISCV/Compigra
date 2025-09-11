@@ -949,6 +949,7 @@ transformkernelBLAS(func::FuncOp funcOp,
     builder.setInsertionPointToStart(blasBlk);
     auto asmBLASOp =
         builder.create<cgra::BlasGemmAsmOp>(blasOp.getLoc(), finiBlk);
+    asmBLASOp->setAttrs(blasOp->getAttrs());
     asmBLASOp->setAttr("blas", builder.getStringAttr(std::to_string(ind)));
 
     for (auto &op : llvm::make_early_inc_range(finiBlk->getOperations())) {

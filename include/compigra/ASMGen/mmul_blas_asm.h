@@ -358,11 +358,69 @@ struct ASMGenBLAS {
     ctrl1 = "BNE R1, R2, " + std::to_string(initPC + 10);
   }
 
-  std::vector<std::vector<std::string>> generatePreCompileCode() const {
+  // std::vector<std::vector<std::string>>
+  // generatePreCompileCode(std::string mulAsm = "",
+  //                        std::string addAsm = "") const {
+  //   auto table = asmTable;
+  //   table[16][9] = ctrl0;
+  //   table[23][4] = ctrl1;
+  //   table[26][3] = ctrl1;
+  //   return table;
+  // }
+
+  std::vector<std::vector<std::string>>
+  generatePreCompileCode(std::string mulAsm = "",
+                         std::string addAsm = "") const {
     auto table = asmTable;
-    table[16][9] = ctrl0;
-    table[23][4] = ctrl1;
-    table[26][3] = ctrl1;
+
+    int insertionRow = 17;
+
+    // Handle mulAsm insertion
+    if (mulAsm != "") {
+      // Create a new row with mulAsm repeated 16 times
+      std::vector<std::string> mulRow(16, mulAsm);
+
+      // Insert the new row at position 16, shifting existing rows down
+      table.insert(table.begin() + insertionRow, mulRow);
+      insertionRow++; // Next insertion will be at row 17
+    }
+
+    // Handle addAsm insertion
+    if (addAsm != "") {
+      // Create a new row with addAsm repeated 16 times
+      std::vector<std::string> addRow(16, addAsm);
+
+      // Insert the new row at the current insertion position
+      table.insert(table.begin() + insertionRow, addRow);
+      insertionRow++; // Update for any future insertions
+    }
+
+    // Apply the control signals (adjust indices based on insertions)
+    int ctrl0Row = 16;
+    int ctrl1Row1 = 23;
+    int ctrl1Row2 = 26;
+
+    // Adjust indices based on what was inserted
+    if (mulAsm != "") {
+      ctrl1Row1++;
+      ctrl1Row2++;
+    }
+    if (addAsm != "") {
+      ctrl1Row1++;
+      ctrl1Row2++;
+    }
+
+    // Apply control signals if the rows exist
+    if (ctrl0Row < table.size()) {
+      table[ctrl0Row][9] = ctrl0;
+    }
+    if (ctrl1Row1 < table.size()) {
+      table[ctrl1Row1][4] = ctrl1;
+    }
+    if (ctrl1Row2 < table.size()) {
+      table[ctrl1Row2][3] = ctrl1;
+    }
+
     return table;
   }
 

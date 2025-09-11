@@ -1012,8 +1012,8 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
   for (int t = startT; t <= endTime; t++) {
     auto ops = getOperationsAtTime(t);
     if (ops.count(0) && isa<cgra::BlasGemmAsmOp>(ops.at(0))) {
-      // In the next 27 time steps, there will be BLAS kernel execution
-      t += blasLatency;
+      auto latencyCC = blasLatency.at(ops.at(0));
+      t += latencyCC;
       continue;
     }
     for (auto [_, op] : ops) {
@@ -1042,7 +1042,16 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
 
     if (ops.count(0) && isa<cgra::BlasGemmAsmOp>(ops.at(0))) {
       ASMGenBLAS asmSchedule(t);
-      auto blasCode = asmSchedule.generatePreCompileCode();
+      auto asmMul =
+          ops.at(0)->getAttr("mulASM")
+              ? ops.at(0)->getAttr("mulASM").cast<StringAttr>().getValue()
+              : "";
+      auto asmAdd =
+          ops.at(0)->getAttr("addASM")
+              ? ops.at(0)->getAttr("addASM").cast<StringAttr>().getValue()
+              : "";
+      auto blasCode =
+          asmSchedule.generatePreCompileCode(asmMul.str(), asmAdd.str());
       asmCode.insert(asmCode.end(), blasCode.begin(), blasCode.end());
       continue;
     }

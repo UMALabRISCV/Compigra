@@ -190,6 +190,108 @@ void computeLiveValue(Region &region,
   }
 }
 
+static bool isAddrConstOp(arith::ConstantOp constOp) {
+  for (auto &use : constOp->getUses()) {
+    if (isa<cgra::LwiOp>(use.getOwner()))
+      return true;
+    // Only address can be used as Imm field of swi operation
+    if (use.getOperandNumber() == 1 && isa<cgra::SwiOp>(use.getOwner()))
+      return true;
+  }
+
+  return false;
+}
+
+void computeLiveValueWithLargeCst(
+    Region &region, std::map<Block *, SetVector<Value>> &liveIns,
+    std::map<Block *, SetVector<Value>> &liveOuts) {
+  // compute def and use for each block
+  std::map<Block *, SetVector<Value>> defMap;
+  std::map<Block *, SetVector<Value>> useMap;
+
+  auto insertValsExceptValidCst = [](Value val, SetVector<Value> &vec) {
+    // if val is produced by a constant operation and in the valid range [-4097,
+    // 4096], not insert it to the set
+    if (auto constOp =
+            dyn_cast_or_null<arith::ConstantOp>(val.getDefiningOp())) {
+      if (isAddrConstOp(constOp))
+        return;
+      auto value = constOp->getAttr("value").cast<IntegerAttr>().getInt();
+      if (value >= -4097 && value <= 4096)
+        return;
+    }
+    vec.insert(val);
+  };
+
+  for (auto &block : region) {
+    SetVector<Value> def;
+    SetVector<Value> use;
+    // push all block arguments to use
+    for (auto arg : block.getArguments()) {
+      // the entry block argument is IN/OUT of the function
+      if (!block.isEntryBlock())
+        insertValsExceptValidCst(arg, use);
+    }
+
+    for (auto &op : block.getOperations()) {
+      if (isa<cgra::BlasGemmOp>(op)) {
+        // skip BlasGemmOp, it directly interfaces with memory
+        continue;
+      }
+      for (auto res : op.getResults())
+        insertValsExceptValidCst(res, def);
+
+      for (auto opr : op.getOperands())
+        // branch argument is not a use
+        insertValsExceptValidCst(opr, use);
+    }
+    defMap[&block] = def;
+    useMap[&block] = use;
+  }
+
+  // calculate (use - def)
+  std::map<Block *, SetVector<Value>> outBBUse;
+  for (auto &block : region) {
+    SetVector<Value> outUse;
+    for (auto V : useMap[&block]) {
+      if (!defMap[&block].count(V)) {
+        outUse.insert(V);
+      }
+    }
+    outBBUse[&block] = outUse;
+  }
+
+  // clear liveIn and liveOut
+  liveIns.clear();
+  liveOuts.clear();
+
+  // compute liveIn and liveOut for each block
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto &block : region) {
+      SetVector<Value> liveIn = outBBUse[&block];
+      SetVector<Value> liveOut = liveOuts[&block];
+
+      // liveIn = outBBUse + (liveOut - def)
+      for (auto val : liveOut)
+        if (!defMap[&block].count(val))
+          insertValsExceptValidCst(val, liveIn);
+
+      for (auto succ : block.getSuccessors()) {
+        // add to succesor's liveOut
+        for (auto val : liveIns[succ])
+          updateLiveOutBySuccessorLiveIn(val, &block, liveOut);
+      }
+      if (liveIn != liveIns[&block] || liveOut != liveOuts[&block]) {
+        liveIns[&block] = liveIn;
+        liveOuts[&block] = liveOut;
+        changed = true;
+      }
+    }
+  }
+}
+
 static SmallVector<Operation *, 4>
 getNextLayerOps(Block *block, SetVector<Value> &liveIn,
                 std::set<Operation *> &visitedOps) {

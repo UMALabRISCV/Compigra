@@ -157,10 +157,10 @@ public:
       auto upperBound = forOp.getUpperBound().getMap();
       int lb = lowerBound.isSingleConstant()
                    ? lowerBound.getSingleConstantResult()
-                   : 100;
+                   : 10;
       int ub = upperBound.isSingleConstant()
                    ? upperBound.getSingleConstantResult()
-                   : 100;
+                   : 10;
       bounds[forOp] = {lb, ub};
       loops.insert(loops.begin(), forOp);
     });

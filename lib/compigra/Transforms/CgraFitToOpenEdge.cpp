@@ -703,6 +703,25 @@ LogicalResult LwiOpRewrite::matchAndRewrite(cgra::LwiOp lwiOp,
   return success();
 }
 
+void reLoadFromMemory(int baseAddr, Value origVal, Block *blasInitBlk,
+                      Block *blasFiniBlk, OpBuilder &builder) {
+  builder.setInsertionPointToStart(blasFiniBlk);
+  auto addrCstlwd = builder.create<arith::ConstantOp>(
+      blasFiniBlk->getTerminator()->getLoc(), builder.getI32Type(),
+      builder.getI32IntegerAttr(baseAddr));
+  auto lwiOp =
+      builder.create<cgra::LwiOp>(blasFiniBlk->getTerminator()->getLoc(),
+                                  origVal.getType(), addrCstlwd.getResult());
+
+  origVal.replaceUsesWithIf(lwiOp.getResult(), [&](OpOperand &operand) {
+    auto userBlk = operand.getOwner()->getBlock();
+    if (operand.getOwner()->getBlock() == origVal.getParentBlock())
+      return false;
+    auto propPath = getBlockPath(blasInitBlk, userBlk);
+    return !propPath.empty();
+  });
+}
+
 void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
   // if the block contains the gemm_blas operation, push all its live-in into
   // memory, and usage of these live-in values should be loaded from memory
@@ -711,7 +730,7 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
 
   int baseAddr = 0xFE00 + 6 * 4; // the gemm_blas operation uses first 6 words
 
-  computeLiveValue(region, liveIns, liveOuts);
+  computeLiveValueWithLargeCst(region, liveIns, liveOuts);
   for (auto &blk : region.getBlocks()) {
     bool hasGemmBlas = false;
     auto &firstOp = blk.getOperations().front();
@@ -720,14 +739,22 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
     if (!hasGemmBlas)
       continue;
 
-    // push all the live-outs values to memory
+    // push all the live values to memory
     for (auto val : liveIns[&blk]) {
-      // if the value is used by the gemm_blas operation, skip it
-      if (llvm::is_contained(firstOp.getOperands(), val))
-        continue;
-
       auto initBlk = *blk.getPredecessors().begin();
       auto finiBlk = *blk.getSuccessors().begin();
+      if (val.getDefiningOp() && isa<cgra::LwiOp>(val.getDefiningOp())) {
+        // if load from constant value
+        auto lwiOp = cast<cgra::LwiOp>(val.getDefiningOp());
+        if (lwiOp.getOperand().getDefiningOp() &&
+            isa<arith::ConstantOp>(lwiOp.getOperand().getDefiningOp())) {
+          auto constAddr =
+              dyn_cast<arith::ConstantOp>(lwiOp.getOperand().getDefiningOp());
+          reLoadFromMemory(constAddr.getValue().cast<IntegerAttr>().getInt(),
+                           val, initBlk, finiBlk, builder);
+          continue;
+        }
+      }
 
       builder.setInsertionPoint(initBlk->getTerminator());
       auto addrCst = builder.create<arith::ConstantOp>(
@@ -735,27 +762,12 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
           builder.getI32IntegerAttr(baseAddr));
       builder.create<cgra::SwiOp>(initBlk->getTerminator()->getLoc(), val,
                                   addrCst.getResult());
-
-      builder.setInsertionPointToStart(finiBlk);
-      auto addrCstlwd = builder.create<arith::ConstantOp>(
-          blk.getTerminator()->getLoc(), builder.getI32Type(),
-          builder.getI32IntegerAttr(baseAddr));
-      auto lwiOp =
-          builder.create<cgra::LwiOp>(finiBlk->getTerminator()->getLoc(),
-                                      val.getType(), addrCstlwd.getResult());
-
-      val.replaceUsesWithIf(lwiOp.getResult(), [&](OpOperand &operand) {
-        auto userBlk = operand.getOwner()->getBlock();
-        if (operand.getOwner()->getBlock() == val.getParentBlock())
-          return false;
-        auto propPath = getBlockPath(initBlk, userBlk);
-        return !propPath.empty();
-      });
+      reLoadFromMemory(baseAddr, val, initBlk, finiBlk, builder);
 
       baseAddr += 4;
     }
     if (hasGemmBlas)
-      computeLiveValue(region, liveIns, liveOuts);
+      computeLiveValueWithLargeCst(region, liveIns, liveOuts);
   }
 }
 
@@ -827,7 +839,6 @@ void CgraFitToOpenEdgePass::runOnOperation() {
         return signalPassFailure();
     }
   }
-  llvm::errs() << funcOp << "\n";
 }
 
 namespace compigra {
