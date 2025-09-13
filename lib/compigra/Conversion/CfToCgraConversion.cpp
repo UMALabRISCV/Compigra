@@ -580,7 +580,7 @@ allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
                     builder.getStringAttr("arg" + std::to_string(ind)));
     SmallVector<Operation *> dimOps;
     int memRefSize = 1;
-    for (int i = 0; i < memrefType.getRank(); i++) {
+    for (int i = 1; i < memrefType.getRank(); i++) {
       auto curDim = memrefType.getDimSize(i);
       memRefSize *= curDim;
       auto dimOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), curDim,
@@ -609,7 +609,7 @@ allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
     SmallVector<Operation *> dimOps;
     int memRefSize = 1;
     auto memrefType = op.getType().cast<MemRefType>();
-    for (int i = 0; i < memrefType.getRank(); i++) {
+    for (int i = 1; i < memrefType.getRank(); i++) {
       auto curDim = memrefType.getDimSize(i);
       memRefSize *= curDim;
       auto dimOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), curDim,

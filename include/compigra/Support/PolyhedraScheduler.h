@@ -13,6 +13,7 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include <queue>
 #ifdef HAVE_Z3
 #include "z3++.h"
 #endif
@@ -20,7 +21,8 @@
 using namespace mlir;
 
 namespace compigra {
-bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp);
+bool isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp,
+                       std::queue<Operation *> &queOps);
 
 void getAllStatements(affine::AffineForOp outerFor,
                       SmallVector<SmallVector<Operation *>> &statements);

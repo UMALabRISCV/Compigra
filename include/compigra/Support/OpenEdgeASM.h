@@ -74,6 +74,8 @@ public:
   OpenEdgeASMGen(Region &region, unsigned maxReg, unsigned grid)
       : region(region), maxReg(maxReg), nRow(grid), nCol(grid) {}
 
+  OpenEdgeASMGen(Region &defaultRegion) : region(defaultRegion) {}
+
   void setRFAccessModel(RFAccessModel model) { rfAccessModel = model; }
   RFAccessModel getRFAccessModel() { return rfAccessModel; }
 
@@ -162,6 +164,8 @@ public:
   /// allocate registers for other operations.
   LogicalResult
   allocateRegisters(std::map<Operation *, Instruction> restriction = {});
+
+  std::map<std::string, std::string> getOpenEdgeISAMap() { return isaMap; };
 
 private:
   /// Convert solution with register allocation result to knownRes which
