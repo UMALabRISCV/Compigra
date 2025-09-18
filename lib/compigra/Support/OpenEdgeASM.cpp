@@ -1050,8 +1050,12 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
           ops.at(0)->getAttr("addASM")
               ? ops.at(0)->getAttr("addASM").cast<StringAttr>().getValue()
               : "";
-      auto blasCode =
-          asmSchedule.generatePreCompileCode(asmMul.str(), asmAdd.str());
+      auto additionOps =
+          ops.at(0)->getAttr("preStoreAsm")
+              ? ops.at(0)->getAttr("preStoreAsm").cast<ArrayAttr>()
+              : ArrayAttr();
+      auto blasCode = asmSchedule.generatePreCompileCode(
+          asmMul.str(), asmAdd.str(), additionOps);
       asmCode.insert(asmCode.end(), blasCode.begin(), blasCode.end());
       continue;
     }

@@ -31,29 +31,41 @@ bool compigra::isSinglePathStore(Value srcVal, affine::AffineStoreOp storeOp,
   // return true
   auto getSingleUser = [&](Value val) {
     auto users = val.getUsers();
-    if (std::distance(users.begin(), users.end()) != 1)
+    if (users.empty())
       return (Operation *)nullptr;
-    auto user = *users.begin();
-    if (user->getNumResults() != 1)
+
+    // Take the first user as reference
+    Operation *firstUser = *users.begin();
+
+    // Ensure all users are the same operation
+    for (auto *u : users) {
+      if (u != firstUser)
+        return (Operation *)nullptr;
+    }
+
+    // Check the user has exactly one result
+    if (firstUser->getNumResults() != 1)
       return (Operation *)nullptr;
-    // check whether the other operands are constants
-    for (auto operand : user->getOperands()) {
+
+    // Check whether all other operands are constants
+    for (auto operand : firstUser->getOperands()) {
       if (operand != val) {
         if (!operand.getDefiningOp() ||
             !isa<arith::ConstantOp>(operand.getDefiningOp()))
           return (Operation *)nullptr;
       }
     }
-    return user;
+
+    return firstUser;
   };
 
   Operation *singleUser = getSingleUser(srcVal);
   while (singleUser) {
+    if (singleUser)
+      queOps.push(singleUser);
     if (singleUser->getResult(0) == storeVal)
       return true;
     singleUser = getSingleUser(singleUser->getResult(0));
-    if (singleUser)
-      queOps.push(singleUser);
   }
   return false;
 }

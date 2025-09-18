@@ -183,7 +183,8 @@ private:
       {"MUL", "SMUL"},  {"DIV", "SDIV"},  {"OR", "LOR"},    {"ORI", "LOR"},
       {"XOR", "LXOR"},  {"XORI", "LXOR"}, {"LSHR", "SRT"},  {"ASHR", "SRA"},
       {"SHL", "SLT"},   {"SHRSI", "SRA"}, {"SHRUI", "SLT"}, {"SHLI", "SLT"},
-      {"AND", "LAND"},  {"ANDI", "LAND"}, {"BR", "JUMP"}};
+      {"AND", "LAND"},  {"ANDI", "LAND"}, {"BR", "JUMP"},   {"BZFA", "BZFA"},
+      {"BSFA", "BSFA"}};
 };
 } // end namespace compigra
 

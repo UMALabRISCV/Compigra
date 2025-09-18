@@ -995,6 +995,11 @@ struct FastASMGenTemporalCGRAPass
         latencyCC++;
       if (blasOp->getAttr("addASM"))
         latencyCC++;
+      if (blasOp->getAttr("preStoreAsm")) {
+        // get the array attr size
+        auto arrayAttr = blasOp->getAttrOfType<ArrayAttr>("preStoreAsm");
+        latencyCC += arrayAttr.size();
+      }
       asmGen.setBlasKernelLatency(blasOp, latencyCC);
       blasLatency[blasOp] = latencyCC;
       llvm::errs() << blasOp << " latency: " << latencyCC << "\n";

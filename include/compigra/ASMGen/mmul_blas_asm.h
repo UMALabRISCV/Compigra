@@ -369,8 +369,8 @@ struct ASMGenBLAS {
   // }
 
   std::vector<std::vector<std::string>>
-  generatePreCompileCode(std::string mulAsm = "",
-                         std::string addAsm = "") const {
+  generatePreCompileCode(std::string mulAsm = "", std::string addAsm = "",
+                         mlir::ArrayAttr additionalAttrs = {}) const {
     auto table = asmTable;
 
     int insertionRow = 17;
@@ -395,6 +395,20 @@ struct ASMGenBLAS {
       insertionRow++; // Update for any future insertions
     }
 
+    // Handle additionalAttrs insertion
+    if (additionalAttrs) {
+      for (auto attr : additionalAttrs) {
+        if (auto stringAttr = attr.dyn_cast<mlir::StringAttr>()) {
+          // Create a new row with the stringAttr value repeated 16 times
+          std::vector<std::string> attrRow(16, stringAttr.getValue().str());
+
+          // Insert the new row at the current insertion position
+          table.insert(table.begin() + insertionRow, attrRow);
+          insertionRow++; // Update for any future insertions
+        }
+      }
+    }
+
     // Apply the control signals (adjust indices based on insertions)
     int ctrl0Row = 16;
     int ctrl1Row1 = 23;
@@ -408,6 +422,14 @@ struct ASMGenBLAS {
     if (addAsm != "") {
       ctrl1Row1++;
       ctrl1Row2++;
+    }
+    if (additionalAttrs) {
+      for (auto attr : additionalAttrs) {
+        if (attr.dyn_cast<mlir::StringAttr>()) {
+          ctrl1Row1++;
+          ctrl1Row2++;
+        }
+      }
     }
 
     // Apply control signals if the rows exist

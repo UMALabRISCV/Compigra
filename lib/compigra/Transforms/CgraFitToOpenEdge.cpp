@@ -718,7 +718,7 @@ void reLoadFromMemory(int baseAddr, Value origVal, Block *blasInitBlk,
     if (operand.getOwner()->getBlock() == origVal.getParentBlock())
       return false;
     auto propPath = getBlockPath(blasInitBlk, userBlk);
-    return !propPath.empty();
+    return !propPath.empty() && !isBackEdge(blasInitBlk, userBlk);
   });
 }
 
