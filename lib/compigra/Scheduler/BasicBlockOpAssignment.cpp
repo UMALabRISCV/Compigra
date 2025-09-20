@@ -216,7 +216,13 @@ void computeLiveValueWithLargeCst(
             dyn_cast_or_null<arith::ConstantOp>(val.getDefiningOp())) {
       if (isAddrConstOp(constOp))
         return;
-      auto value = constOp->getAttr("value").cast<IntegerAttr>().getInt();
+      int64_t value = 0;
+      auto attr = constOp->getAttr("value");
+      if (auto intAttr = attr.dyn_cast<IntegerAttr>()) {
+        value = intAttr.getInt();
+      } else if (auto floatAttr = attr.dyn_cast<FloatAttr>()) {
+        value = static_cast<int64_t>(floatAttr.getValueAsDouble());
+      }
       if (value >= -4097 && value <= 4096)
         return;
     }
