@@ -68,7 +68,7 @@ public:
 
   // The schedule result comes from external scheduler, which does not support
   // DFG split for the blocks.
-  void resctrictBBSchedule(const std::map<Operation *, ScheduleUnit> res);
+  void restrictBBSchedule(const std::map<Operation *, ScheduleUnit> res);
 
   // void setupLoadForRestriction(Block *restrictBB, Block *enableLoad) {
   //   restrictedBBs.insert(restrictBB);

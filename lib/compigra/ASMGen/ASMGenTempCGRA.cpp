@@ -108,26 +108,32 @@ static LogicalResult preScheduleUsingModuloScheduler(
                           "/out_raw_bb" + std::to_string(bbInd) + ".sat\n";
 
     // call the python code script to solve the MS
-    llvm::errs() << "---> Running the SAT-Solver: \n" << command << "\n";
+    llvm::errs() << "---> Running the Modulo Scheduler: \n" << command;
 
     int result = system(command.c_str());
     if (result != 0)
       continue;
-    llvm::errs() << "SAT-solver done\n";
+    llvm::errs() << "Modulo Scheduler done\n";
     // read the result and update the schedule
-    std::string mapResult =
-        outputDAG + "/out_raw_bb" + std::to_string(bbInd) + ".sat";
+
     int opSize = blk.getOperations().size();
 
     int II;
     std::map<int, Instruction> instructions;
     std::map<int, std::set<int>> opTimeMap;
     std::vector<std::set<int>> basicBlocksWithOpIds = {};
-    if (failed(readMapFile(mapResult, maxReg,
+    if (failed(readMapFile(outputDAG, "bb" + std::to_string(bbInd), maxReg,
                            opSize + blk.getNumArguments() - 1, II, opTimeMap,
                            basicBlocksWithOpIds, instructions)))
       continue;
 
+    // print instructions
+    for (auto [id, inst] : instructions) {
+      llvm::errs() << "Id: " << id << ", Name: " << inst.name
+                   << ", Time: " << inst.time << ", PE: " << inst.pe
+                   << ", Rout: " << inst.Rout << ", OpA: " << inst.opA
+                   << ", OpB: " << inst.opB << "\n";
+    }
     std::map<int, int> execTime = getLoopOpUnfoldExeTime(opTimeMap);
     if (!memoryConsistencySchedule(execTime, II, &blk) ||
         !kernelOverlap(basicBlocksWithOpIds))
@@ -153,7 +159,7 @@ static LogicalResult preScheduleUsingModuloScheduler(
     scheduler.setupPrerequisite(prereq);
 
     auto sol = adapter.getSolutions();
-    scheduler.resctrictBBSchedule(sol);
+    scheduler.restrictBBSchedule(sol);
   }
   return success();
 }
@@ -196,7 +202,8 @@ struct ASMGenTemporalCGRAPass
 
     if (failed(scheduler.createSchedulerAndSolve())) {
       llvm::errs() << "Failed to create scheduler and solve\n";
-      return signalPassFailure();
+      // return signalPassFailure();
+      return;
     }
     // return;
 

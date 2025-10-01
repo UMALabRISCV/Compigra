@@ -14,7 +14,9 @@
 #include "compigra/ASMGen/FastASMGenTempCGRA.h"
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
+#include "compigra/Scheduler/BasicBlockILPModel.h"
 #include "compigra/Scheduler/BasicBlockOpAssignment.h"
+#include "compigra/Scheduler/ModuloScheduleAdapter.h"
 #include "compigra/Support/OpenEdgeASM.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -705,6 +707,115 @@ void optimizeAcrossBBValuePlacement(
     }
     bbFiniGraphs[bb] = finiGraph;
   }
+}
+
+static LogicalResult preScheduleWithExternalSupport(
+    func::FuncOp funcOp, std::string outputDAG, std::string pythonExectuable,
+    Region &r, OpBuilder &builder,
+    std::vector<ValuePlacement> &globalConstraint,
+    SmallVector<Block *, 4> &preScheduledBlks,
+    std::map<mlir::Operation *, compigra::ScheduleUnit> &globalSolution,
+    unsigned peGridSize = 4, unsigned maxReg = 3) {
+  // Find the loop block
+  int bbInd = -1;
+  liveVec schedulerRequirements;
+  for (auto &blk : llvm::make_early_inc_range(funcOp.getBlocks())) {
+    bbInd++;
+    // check whether the block can be compiled using blas
+    if (isa<cgra::BlasGemmAsmOp>(blk.getOperations().front())) {
+      preScheduledBlks.push_back(&blk);
+      continue;
+    }
+
+    bool isLoop =
+        std::find(blk.getSuccessors().begin(), blk.getSuccessors().end(),
+                  &blk) != blk.getSuccessors().end();
+    if (!isLoop)
+      continue;
+
+    // initialize print function
+    satmapit::PrintSatMapItDAG printer(blk.getTerminator());
+    printer.init();
+    if (failed(printer.printDAG(outputDAG + "/bb" + std::to_string(bbInd))))
+      continue;
+
+    // detect whether the python executable exist
+    std::string command = pythonExectuable + " -path " + outputDAG +
+                          "/ -bench bb" + std::to_string(bbInd) + " -x " +
+                          std::to_string(peGridSize) + " -y " +
+                          std::to_string(peGridSize) + " > " + outputDAG +
+                          "/out_raw_bb" + std::to_string(bbInd) + ".sat\n";
+
+    // call the python code script to solve the MS
+    llvm::errs() << "---> Running the SAT-Solver: \n" << command;
+
+    int result = system(command.c_str());
+    if (result != 0)
+      continue;
+    llvm::errs() << "SAT-solver done\n";
+    int opSize = blk.getOperations().size();
+
+    int II;
+    std::map<int, Instruction> instructions;
+    std::map<int, std::set<int>> opTimeMap;
+    std::vector<std::set<int>> basicBlocksWithOpIds = {};
+    if (failed(readMapFile(outputDAG, "bb" + std::to_string(bbInd), maxReg,
+                           opSize + blk.getNumArguments() - 1, II, opTimeMap,
+                           basicBlocksWithOpIds, instructions)))
+      continue;
+
+    std::map<int, int> execTime = getLoopOpUnfoldExeTime(opTimeMap);
+    if (!kernelOverlap(basicBlocksWithOpIds))
+      continue;
+
+    llvm::errs() << "II: " << II << "\n\n";
+    if (failed(initBlockArgs(&blk, instructions, builder)))
+      return failure();
+
+    ModuloScheduleAdapter adapter(r, &blk, builder, II, execTime, opTimeMap,
+                                  basicBlocksWithOpIds);
+    if (failed(adapter.init()))
+      continue;
+
+    if (failed(adapter.adaptCFGWithLoopMS()))
+      return failure();
+
+    // assign basic block with the schedule result
+    if (failed(adapter.assignScheduleResult(instructions, maxReg,
+                                            peGridSize * peGridSize)))
+      return failure();
+    auto prereq = adapter.getPrerequisites();
+    schedulerRequirements.insert(schedulerRequirements.end(), prereq.begin(),
+                                 prereq.end());
+
+    //  write the schedule result to global constraint with register attributes
+    auto sol = adapter.getSolutions();
+    for (auto [op, su] : sol)
+      globalSolution[op] = su;
+
+    for (auto &valPlace : prereq) {
+      Value val = valPlace.first;
+      auto pe = valPlace.second;
+      RegAttr regAttr = RegAttr::IN;
+      if (val.getDefiningOp() && sol.count(val.getDefiningOp())) {
+        if (sol[val.getDefiningOp()].reg == maxReg)
+          regAttr = RegAttr::EX;
+      }
+
+      globalConstraint.push_back(
+          ValuePlacement{val, (unsigned)pe, regAttr}); // pe, regAttr
+      for (auto blk : adapter.getNewBlocks()) {
+        if (std::find(preScheduledBlks.begin(), preScheduledBlks.end(), blk) ==
+            preScheduledBlks.end()) {
+          preScheduledBlks.push_back(blk);
+        }
+      }
+      // preScheduledBlks.insert(preScheduledBlks.end(),
+      //                         adapter.getNewBlocks().begin(),
+      //                         adapter.getNewBlocks().end());
+    }
+  }
+  return success();
 }
 
 namespace {

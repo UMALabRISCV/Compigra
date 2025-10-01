@@ -446,7 +446,7 @@ void TemporalCGRAScheduler::saveSubILPModelResult(
   }
 }
 
-void TemporalCGRAScheduler::resctrictBBSchedule(
+void TemporalCGRAScheduler::restrictBBSchedule(
     const std::map<Operation *, ScheduleUnit> res) {
   for (auto [op, su] : res) {
     restrictedBBs.insert(op->getBlock());

@@ -1012,15 +1012,19 @@ LogicalResult ModuloScheduleAdapter::assignScheduleResult(
     if (iterId == -1)
       continue;
     for (auto [opId, op] : opMap) {
+      if (opId == loopOpNum - 1)
+        termPE = instructions.at(opId).pe;
+
       auto execTimeInBB = execTime.at(opId) + iterId * II;
       int reg = instructions.at(opId).Rout == maxReg ? maxReg : -1;
       ScheduleUnit schedule = {execTimeInBB, instructions.at(opId).pe, reg};
       solution[op] = schedule;
+      llvm::errs() << "Schedule opId " << *op << " at time " << execTimeInBB
+                   << " on PE " << instructions.at(opId).pe << "\n";
 
       if (op->getNumResults() > 0)
         prerequisites.push_back({op->getResult(0), instructions.at(opId).pe});
-      if (opId == loopOpNum - 1)
-        termPE = instructions.at(opId).pe;
+
       // assign the corresponding consumer with the schedule
       for (auto opr : op->getOperands()) {
         if (std::find(newBlocks.begin(), newBlocks.end(),

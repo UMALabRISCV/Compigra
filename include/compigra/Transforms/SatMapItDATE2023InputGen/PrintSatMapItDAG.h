@@ -100,7 +100,7 @@ private:
 
 /// Parse the produced map and register allocation result produced by Sat-MapIt.
 void parseLine(const std::string &line, std::map<int, Instruction> &instMap,
-               const unsigned maxReg);
+               const std::map<int, std::string> &nameMap, const unsigned maxReg);
 
 /// Parse the module schedule result which include the prolog, kernel and epilog
 void parsePKE(const std::string &line, unsigned termId,
