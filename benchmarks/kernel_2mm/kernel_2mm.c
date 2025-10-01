@@ -19,6 +19,8 @@
 #define NJ 8
 #define NK 8
 #define NL 8
+#define ALPHA 3
+#define BETA 6
 
 void kernel_2mm(int alpha_ptr[1],
                 int beta_ptr[1],
@@ -33,8 +35,6 @@ void kernel_2mm(int alpha_ptr[1],
     int nj = NJ;
     int nk = NK;
     int nl = NL;
-    int alpha = alpha_ptr[0];
-    int beta = beta_ptr[0];
 
     /* D := alpha*A*B*C + beta*D */
     for (i = 0; i < ni; i++)
@@ -42,12 +42,12 @@ void kernel_2mm(int alpha_ptr[1],
         {
             tmp[i][j] = 0;
             for (k = 0; k < nk; ++k)
-                tmp[i][j] += alpha * A[i][k] * B[k][j];
+                tmp[i][j] += ALPHA * A[i][k] * B[k][j];
         }
     for (i = 0; i < ni; i++)
         for (j = 0; j < nl; j++)
         {
-            D[i][j] *= beta;
+            D[i][j] *= BETA;
             for (k = 0; k < nj; ++k)
                 D[i][j] += tmp[i][k] * C[k][j];
         }

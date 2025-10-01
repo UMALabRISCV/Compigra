@@ -277,26 +277,6 @@ LogicalResult PrintSatMapItDAG::printDAG(std::string fileName) {
                   << " live_in LiveInFromArg  28 -1 -1 -1 0 0\n";
       continue;
     }
-
-    // for (auto user : defOp->getUsers()) {
-    //   if (user->getBlock() != loopBlock)
-    //     continue;
-    //   unsigned posLR = user->getOperand(0).getDefiningOp() == defOp ? 1 : 0;
-
-    //   // get the integer or floating point constant value of constOp
-    //   int constVal;
-    //   if (auto intAttr = defOp->getAttr("value").dyn_cast<IntegerAttr>()) {
-    //     constVal = intAttr.getInt();
-    //   } else if (auto floatAttr =
-    //                  defOp->getAttr("value").dyn_cast<FloatAttr>()) {
-    //     constVal = static_cast<int>(floatAttr.getValue().convertToFloat());
-    //   } else {
-    //     LLVM_DEBUG(llvm::dbgs() << "Unsupported constant type\n");
-    //     return failure();
-    //   }
-    //   nodeFStream << std::to_string(opId) << " constant nil -1 -1 -1 -1 "
-    //               << constVal << " " << posLR << "\n";
-    // }
   }
 
   nodeFStream.close();
@@ -308,12 +288,36 @@ void satmapit::parsePKE(const std::string &line, unsigned termId,
                         std::vector<std::set<int>> &timeSlotsOfBBs,
                         std::map<int, std::set<int>> &opTimeMap) {
   std::istringstream lineStream(line);
-  // first parse t: time
-  std::string token, tStr;
-  // Read the first part (t: t)
+  std::string token;
+
+  // Read the first token (should be "t:X" or "t: X" format)
   std::getline(lineStream, token, ' ');
-  std::getline(lineStream, token, ' ');
-  int tVal = std::stoi(token.substr(token.find(":") + 1));
+
+  // Find the colon and extract the time value
+  size_t colonPos = token.find(':');
+  if (colonPos == std::string::npos) {
+    // Handle error - no colon found
+    return;
+  }
+
+  // Extract the part after the colon, handling potential whitespace
+  std::string timeStr = token.substr(colonPos + 1);
+
+  // If timeStr is empty, the time value might be in the next token
+  int tVal;
+  if (timeStr.empty()) {
+    // Time value is in the next space-separated token
+    if (std::getline(lineStream, token, ' ')) {
+      tVal = std::stoi(token);
+    } else {
+      // Handle error - no time value found
+      return;
+    }
+  } else {
+    // Time value is directly after the colon (no space)
+    tVal = std::stoi(timeStr);
+  }
+
   timeSlotsOfBBs.back().insert(tVal);
 
   // Initialize the set for the values
@@ -323,73 +327,230 @@ void satmapit::parsePKE(const std::string &line, unsigned termId,
   while (std::getline(lineStream, token, ' ')) {
     if (!token.empty()) {
       values.insert(std::stoi(token));
-      // if (std::stoi(token) == termId)
-      //   // push back a new set for the new basic block
-      //   timeSlotsOfBBs.push_back({});
     }
   }
   opTimeMap[tVal] = values;
 }
 
+// void satmapit::parsePKE(const std::string &line, unsigned termId,
+//                         std::vector<std::set<int>> &timeSlotsOfBBs,
+//                         std::map<int, std::set<int>> &opTimeMap) {
+//   std::istringstream lineStream(line);
+//   // first parse t: time
+//   std::string token, tStr;
+//   // Read the first part (t: t)
+//   std::getline(lineStream, token, ' ');
+//   std::getline(lineStream, token, ' ');
+//   int tVal = std::stoi(token.substr(token.find(":") + 1));
+//   timeSlotsOfBBs.back().insert(tVal);
+
+//   // Initialize the set for the values
+//   std::set<int> values;
+
+//   // Read the remaining parts (values)
+//   while (std::getline(lineStream, token, ' ')) {
+//     if (!token.empty()) {
+//       values.insert(std::stoi(token));
+//       // if (std::stoi(token) == termId)
+//       //   // push back a new set for the new basic block
+//       //   timeSlotsOfBBs.push_back({});
+//     }
+//   }
+//   opTimeMap[tVal] = values;
+// }
+
+// Helper function to safely extract value from token pair
+std::string extractValue(std::istringstream &stream, bool &hasMore) {
+  std::string token1, token2;
+  if (!std::getline(stream, token1, ' ') ||
+      !std::getline(stream, token2, ' ')) {
+    hasMore = false;
+    return "";
+  }
+  size_t colonPos = token2.find(":");
+  if (colonPos != std::string::npos) {
+    return token2.substr(colonPos + 1);
+  }
+  return token2;
+}
+
+// Helper function to safely convert string to int without exceptions
+static int safeStoi(const std::string &str, int defaultVal = -1) {
+  if (str.empty())
+    return defaultVal;
+
+  // Check if string contains only digits (and optional leading minus)
+  size_t start = 0;
+  if (str[0] == '-')
+    start = 1;
+
+  for (size_t i = start; i < str.length(); ++i) {
+    if (!std::isdigit(str[i])) {
+      return defaultVal;
+    }
+  }
+
+  // Manual conversion
+  int result = 0;
+  bool negative = (str[0] == '-');
+  start = negative ? 1 : 0;
+
+  for (size_t i = start; i < str.length(); ++i) {
+    result = result * 10 + (str[i] - '0');
+  }
+
+  return negative ? -result : result;
+}
+
 void satmapit::parseLine(const std::string &line,
                          std::map<int, Instruction> &instMap,
+                         const std::map<int, std::string> &nameMap,
                          const unsigned maxReg) {
 
   std::istringstream lineStream(line);
-  std::string idStr, nameStr, timeStr, peStr, RoutStr, opAStr, opBStr, immStr;
-  std::string idVal, nameVal, timeVal, peVal, RoutVal, opAVal, opBVal, immVal;
-  // Read Id token
-  std::getline(lineStream, idStr, ' ');
-  std::getline(lineStream, idVal, ' ');
-  int id = std::stoi(idVal.substr(idVal.find(":") + 1));
+  std::string token;
 
-  // Read name
-  std::getline(lineStream, nameStr, ' ');
-  std::getline(lineStream, nameVal, ' ');
-  nameVal = nameVal.substr(nameVal.find(":") + 1);
-
-  // Read time
-  std::getline(lineStream, timeStr, ' ');
-  std::getline(lineStream, timeVal, ' ');
-  timeVal = timeVal.substr(timeVal.find(":") + 1);
-
-  // Read pe
-  std::getline(lineStream, peStr, ' ');
-  std::getline(lineStream, peVal, ' ');
-  peVal = peVal.substr(peVal.find(":") + 1);
-
-  // Read Rout
-  std::getline(lineStream, RoutStr, ' ');
-  std::getline(lineStream, RoutVal, ' ');
-  RoutVal = RoutVal.substr(RoutVal.find(":") + 1);
-  // if RoutVal = Ri:i, else RoutVal = Rout(mexReg)
-  // Find substr after R, if it is out, then it is Rout, else it is Ri
-  auto reg = RoutVal.substr(RoutVal.find("R") + 1);
-  RoutVal = reg == "OUT" ? std::to_string(maxReg) : reg;
-
-  // Read opA
-  std::getline(lineStream, opAStr, ' ');
-  std::getline(lineStream, opAVal, ' ');
-  opAVal = opAVal.substr(opAVal.find(":") + 1);
-
-  // Read opB
-  std::getline(lineStream, opBStr, ' ');
-  std::getline(lineStream, opBVal, ' ');
-  opBVal = opBVal.substr(opBVal.find(":") + 1);
-
-  // Read immediate
-  std::getline(lineStream, immStr, ' ');
-  std::getline(lineStream, immVal, ' ');
-  immVal = immVal.substr(immVal.find(":") + 1);
-
-  // Create and insert the Inst object
+  // Initialize instruction with default values
   Instruction inst;
-  inst.name = nameVal;
-  inst.time = std::stoi(timeVal);
-  inst.pe = std::stoi(peVal);
-  inst.Rout = std::stoi(RoutVal);
-  // inst.opA = opAVal;
-  // inst.opB = opBVal;
+  inst.name = "";
+  inst.time = -1;
+  inst.pe = -1;
+  inst.Rout = -1;
+
+  int id = -1;
+  bool foundId = false;
+
+  auto toLower = [](const std::string &str) {
+    std::string lowerStr = str;
+    std::transform(lowerStr.begin(), lowerStr.end(), lowerStr.begin(),
+                   ::tolower);
+    return lowerStr;
+  };
+
+  // Parse tokens looking for "attribute: value" pairs
+  while (lineStream >> token) {
+    // Look for colon in current token
+    size_t colonPos = token.find(":");
+    if (colonPos != std::string::npos) {
+      // Extract attribute name (before colon)
+      std::string attrName = token.substr(0, colonPos);
+      // Extract value (after colon, might be in same token or next)
+      std::string value;
+
+      if (colonPos + 1 < token.length()) {
+        // Value is in the same token after colon
+        value = token.substr(colonPos + 1);
+      } else {
+        // Value is in the next token
+        if (lineStream >> value) {
+          // Got the value
+        } else {
+          continue; // No value found, skip this attribute
+        }
+      }
+
+      // Process based on attribute name
+      if (attrName == "Id") {
+        id = safeStoi(value);
+        foundId = true;
+      } else {
+        std::string lowerAttrName = toLower(attrName);
+        if (lowerAttrName == "name") {
+          inst.name = value;
+        } else if (lowerAttrName == "time") {
+          inst.time = safeStoi(value);
+        } else if (lowerAttrName == "pe") {
+          inst.pe = safeStoi(value);
+        } else if (lowerAttrName == "rout") {
+          size_t rPos = value.find("R");
+          if (rPos != std::string::npos) {
+            auto reg = value.substr(rPos + 1);
+            if (reg == "OUT") {
+              inst.Rout = static_cast<int>(maxReg);
+            } else {
+              inst.Rout = safeStoi(reg);
+            }
+          } else {
+            inst.Rout = safeStoi(value);
+          }
+        }
+      }
+    }
+  }
+
+  // If no valid ID found, return
+  if (!foundId || id == -1) {
+    return;
+  }
+
+  // If name wasn't parsed from line, try to get it from nameMap
+  if (inst.name.empty()) {
+    inst.name = nameMap.count(id) ? nameMap.at(id) : "Unknown";
+  }
 
   instMap[id] = inst;
 }
+
+// void satmapit::parseLine(const std::string &line,
+//                          std::map<int, Instruction> &instMap,
+//                          const unsigned maxReg) {
+
+//   std::istringstream lineStream(line);
+//   std::string idStr, nameStr, timeStr, peStr, RoutStr, opAStr, opBStr,
+//   immStr; std::string idVal, nameVal, timeVal, peVal, RoutVal, opAVal,
+//   opBVal, immVal;
+//   // Read Id token
+//   std::getline(lineStream, idStr, ' ');
+//   std::getline(lineStream, idVal, ' ');
+//   int id = std::stoi(idVal.substr(idVal.find(":") + 1));
+
+//   // Read name
+//   std::getline(lineStream, nameStr, ' ');
+//   std::getline(lineStream, nameVal, ' ');
+//   nameVal = nameVal.substr(nameVal.find(":") + 1);
+
+//   // Read time
+//   std::getline(lineStream, timeStr, ' ');
+//   std::getline(lineStream, timeVal, ' ');
+//   timeVal = timeVal.substr(timeVal.find(":") + 1);
+
+//   // Read pe
+//   std::getline(lineStream, peStr, ' ');
+//   std::getline(lineStream, peVal, ' ');
+//   peVal = peVal.substr(peVal.find(":") + 1);
+
+//   // Read Rout
+//   std::getline(lineStream, RoutStr, ' ');
+//   std::getline(lineStream, RoutVal, ' ');
+//   RoutVal = RoutVal.substr(RoutVal.find(":") + 1);
+//   // if RoutVal = Ri:i, else RoutVal = Rout(mexReg)
+//   // Find substr after R, if it is out, then it is Rout, else it is Ri
+//   auto reg = RoutVal.substr(RoutVal.find("R") + 1);
+//   RoutVal = reg == "OUT" ? std::to_string(maxReg) : reg;
+
+//   // Read opA
+//   std::getline(lineStream, opAStr, ' ');
+//   std::getline(lineStream, opAVal, ' ');
+//   opAVal = opAVal.substr(opAVal.find(":") + 1);
+
+//   // Read opB
+//   std::getline(lineStream, opBStr, ' ');
+//   std::getline(lineStream, opBVal, ' ');
+//   opBVal = opBVal.substr(opBVal.find(":") + 1);
+
+//   // Read immediate
+//   std::getline(lineStream, immStr, ' ');
+//   std::getline(lineStream, immVal, ' ');
+//   immVal = immVal.substr(immVal.find(":") + 1);
+
+//   // Create and insert the Inst object
+//   Instruction inst;
+//   inst.name = nameVal;
+//   inst.time = std::stoi(timeVal);
+//   inst.pe = std::stoi(peVal);
+//   inst.Rout = std::stoi(RoutVal);
+//   // inst.opA = opAVal;
+//   // inst.opB = opBVal;
+
+//   instMap[id] = inst;
+// }

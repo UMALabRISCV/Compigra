@@ -14,6 +14,7 @@
 #include "compigra/ASMGen/FastASMGenTempCGRA.h"
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
+#include "compigra/Scheduler/BasicBlockILPModel.h"
 #include "compigra/Scheduler/BasicBlockOpAssignment.h"
 #include "compigra/Scheduler/ModuloScheduleAdapter.h"
 #include "compigra/Support/OpenEdgeASM.h"
@@ -759,16 +760,13 @@ static LogicalResult preScheduleWithExternalSupport(
     if (result != 0)
       continue;
     llvm::errs() << "SAT-solver done\n";
-    // read the result and update the schedule
-    std::string mapResult =
-        outputDAG + "/out_raw_bb" + std::to_string(bbInd) + ".sat";
     int opSize = blk.getOperations().size();
 
     int II;
     std::map<int, Instruction> instructions;
     std::map<int, std::set<int>> opTimeMap;
     std::vector<std::set<int>> basicBlocksWithOpIds = {};
-    if (failed(readMapFile(mapResult, maxReg,
+    if (failed(readMapFile(outputDAG, "bb" + std::to_string(bbInd), maxReg,
                            opSize + blk.getNumArguments() - 1, II, opTimeMap,
                            basicBlocksWithOpIds, instructions)))
       continue;
@@ -790,8 +788,8 @@ static LogicalResult preScheduleWithExternalSupport(
       return failure();
 
     // assign basic block with the schedule result
-    if (failed(adapter.assignScheduleResult(instructions, schedulerRequirements,
-                                            maxReg, peGridSize * peGridSize)))
+    if (failed(adapter.assignScheduleResult(instructions, maxReg,
+                                            peGridSize * peGridSize)))
       return failure();
     auto prereq = adapter.getPrerequisites();
     schedulerRequirements.insert(schedulerRequirements.end(), prereq.begin(),

@@ -62,8 +62,8 @@ getLoopOpUnfoldExeTime(const std::map<int, std::set<int>> opTimeMap);
 
 /// Function to parse the scheduled results produced by SAT-MapIt line by
 /// line and store the instruction in the map.
-LogicalResult readMapFile(std::string mapResult, unsigned maxReg,
-                          unsigned numOps, int &II,
+LogicalResult readMapFile(std::string outFolder, std::string bench,
+                          unsigned maxReg, unsigned numOps, int &II,
                           std::map<int, std::set<int>> &opTimeMap,
                           std::vector<std::set<int>> &timeSlotsOfBBs,
                           std::map<int, Instruction> &instructions);

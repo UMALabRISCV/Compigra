@@ -1121,18 +1121,62 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
   }
 }
 
+static void getIdName(const std::string nodeFile,
+                      std::map<int, std::string> &nameMap) {
+  std::ifstream file(nodeFile);
+  if (!file.is_open()) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "Unable to open node file: " << nodeFile << "\n");
+    return; // Could not open file
+  }
+
+  std::string line;
+  while (std::getline(file, line)) {
+    if (line.empty())
+      continue;
+
+    std::istringstream lineStream(line);
+    std::string idStr, typeStr, nodeNameStr;
+
+    // Read ID (first element)
+    if (!std::getline(lineStream, idStr, ' '))
+      continue;
+
+    // Read type (second element - ignore)
+    if (!std::getline(lineStream, typeStr, ' '))
+      continue;
+
+    // Read nodeName (third element)
+    if (!std::getline(lineStream, nodeNameStr, ' '))
+      continue;
+
+    int id = std::stoi(idStr);
+    if (id != -1) {
+      // Update the instruction name if the ID exists in the map
+      nameMap[id] = nodeNameStr;
+    }
+  }
+
+  file.close();
+}
+
 /// Function to parse the scheduled results produced by SAT-MapIt line by
 /// line and store the instruction in the map.
-LogicalResult compigra::readMapFile(std::string mapResult, unsigned maxReg,
-                                    unsigned numOps, int &II,
+LogicalResult compigra::readMapFile(std::string outFolder, std::string bench,
+                                    unsigned maxReg, unsigned numOps, int &II,
                                     std::map<int, std::set<int>> &opTimeMap,
                                     std::vector<std::set<int>> &timeSlotsOfBBs,
                                     std::map<int, Instruction> &instructions) {
+  std::string mapResult = outFolder + "/out_raw_" + bench + ".sat";
   std::ifstream file(mapResult);
   if (!file.is_open()) {
     llvm::errs() << "Unable to open " << mapResult << "\n";
     return failure();
   }
+
+  std::string nodeFile = outFolder + "/" + bench + "_nodes";
+  std::map<int, std::string> nameMap;
+  getIdName(nodeFile, nameMap);
 
   std::string line;
 
@@ -1167,7 +1211,7 @@ LogicalResult compigra::readMapFile(std::string mapResult, unsigned maxReg,
       parsed = true;
     }
     if (parsing)
-      satmapit::parseLine(line, instructions, maxReg);
+      satmapit::parseLine(line, instructions, nameMap, maxReg);
   }
 
   if (parsed)

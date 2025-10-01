@@ -6,16 +6,14 @@
 #define NM 3
 #define NK 3   
 
-void conv2d(int input_size[2],      
-            int kernel_size[2],     
-            float input[NI][NJ],    
+void conv2d(float input[NI][NJ],    
             float kernel[NM][NK],   
-            float output[NI-NM+1][NI-NK+1]) { 
+            float output[NI-NM+1][NJ-NK+1]) { 
 
-    int input_height = input_size[0];
-    int input_width = input_size[1];
-    int kernel_height = kernel_size[0];
-    int kernel_width = kernel_size[1];
+    int input_height = NI;
+    int input_width = NJ;
+    int kernel_height = NM;
+    int kernel_width = NK;
 
     int i, j, m, n;
     
