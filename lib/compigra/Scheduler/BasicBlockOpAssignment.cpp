@@ -21,7 +21,9 @@ using namespace mlir;
 using namespace compigra;
 
 // Function to log messages to a file
-void logMessage(const std::string &message, bool overwrite) {
+void logMessage(const std::string &message, bool overwrite, bool debug) {
+  if (!debug)
+    return;
   // if overwrite is true, clear the log file
   if (overwrite) {
     std::ofstream logFile("compigra_mapping.log",
@@ -1142,10 +1144,12 @@ static void printResourceGraph(std::map<int, PERegUse> freeReg,
   logMessage(message);
 }
 
-static ValuePlacement getInitialLiveInPlacement(
-    Value in, Block *block, std::vector<ValuePlacement> &initGraph,
-    const std::map<Block *, SetVector<Value>> liveIns,
-    const std::map<Block *, SetVector<Value>> liveOuts, GridAttribute &attr) {
+static ValuePlacement
+getInitialLiveInPlacement(Value in, Block *block,
+                          std::vector<ValuePlacement> &initGraph,
+                          const std::map<Block *, SetVector<Value>> liveIns,
+                          const std::map<Block *, SetVector<Value>> liveOuts,
+                          GridAttribute &attr, bool debug = false) {
   // if the value has more than 3 users, it should be external register
   int userNum = 0;
   for (auto user : in.getUsers())
@@ -1180,12 +1184,14 @@ static ValuePlacement getInitialLiveInPlacement(
   if (regAttr == RegAttr::EX || regAttr == RegAttr::IE)
     freeReg[pe].exAvail = false;
 
-  std::string inStr;
-  llvm::raw_string_ostream rso(inStr);
-  rso << in;
+  if (debug) {
+    std::string inStr;
+    llvm::raw_string_ostream rso(inStr);
+    rso << in;
 
-  logMessage("INIT GRAPH: " + rso.str() + " " + std::to_string(pe) + " " +
-             std::to_string(static_cast<int>(regAttr)));
+    logMessage("INIT GRAPH: " + rso.str() + " " + std::to_string(pe) + " " +
+               std::to_string(static_cast<int>(regAttr)));
+  }
   return ValuePlacement{in, pe, regAttr};
 }
 
@@ -1203,7 +1209,7 @@ void BasicBlockOpAssignment::initEmbeddingGraphWithLiveIn(
     // randomly assign the PE to the liveIn value
     if (it == initGraph.end()) {
       place = getInitialLiveInPlacement(val, curBlock, initGraph, liveIns,
-                                        liveOuts, attr);
+                                        liveOuts, attr, DebugMode);
       initGraph.push_back(place);
     } else {
       place = *it;
@@ -1282,7 +1288,8 @@ LogicalResult BasicBlockOpAssignment::adaptWithFinalPlacement(
           }
 
           popTime = std::max(popTime, scheduleResult.at(user).time);
-          logMessage("outside PE user : " + std::to_string(popTime));
+          logMessage("outside PE user : " + std::to_string(popTime), false,
+                     DebugMode);
         }
       }
     }
@@ -1309,7 +1316,8 @@ LogicalResult BasicBlockOpAssignment::adaptWithFinalPlacement(
       scheduleResult[curBlock->getTerminator()].time = bbEndTime + 1;
     }
     logMessage("Pop time: " + std::to_string(popTime) + " " +
-               std::to_string(bbEndTime));
+                   std::to_string(bbEndTime),
+               false, DebugMode);
     if (lastProducer) {
       builder.setInsertionPoint(lastProducer);
     } else {
@@ -1328,11 +1336,13 @@ LogicalResult BasicBlockOpAssignment::adaptWithFinalPlacement(
     //            (isa<cgra::ConditionalBranchOp>(owner) &&
     //             use.getOperandNumber() > 1)));
     // });
-    std::string message;
-    llvm::raw_string_ostream rso(message);
-    rso << "Pop out " << curPlace.val << " at time " << popTime << " in PE "
-        << curPlace.pe << " with " << *popOp << "\n";
-    logMessage(rso.str());
+    if (DebugMode) {
+      std::string message;
+      llvm::raw_string_ostream rso(message);
+      rso << "Pop out " << curPlace.val << " at time " << popTime << " in PE "
+          << curPlace.pe << " with " << *popOp << "\n";
+      logMessage(rso.str());
+    }
   }
 
   return success();
@@ -1752,11 +1762,13 @@ int BasicBlockOpAssignment::placeOperations(
     tmpScheduledOps.insert(op);
     tmpResult[op] = assignPE;
 
-    std::string message;
-    llvm::raw_string_ostream rso(message);
-    rso << *op << "-> PE: " << assignPE.first
-        << " RegAttr: " << static_cast<int>(assignPE.second) << "\n";
-    logMessage(rso.str());
+    if (DebugMode) {
+      std::string message;
+      llvm::raw_string_ostream rso(message);
+      rso << *op << "-> PE: " << assignPE.first
+          << " RegAttr: " << static_cast<int>(assignPE.second) << "\n";
+      logMessage(rso.str());
+    }
   }
 
   for (auto op : tmpScheduledOps) {
@@ -1875,12 +1887,14 @@ int BasicBlockOpAssignment::createRoutePath(
         getOccupiedValue(curGraph, finiGraph, scheduledOps, curBlock, i);
     // if the pe is occupied but not by the producer, return false
     if (occupied.val && prodPEs.count(i) > 0) {
-      std::string message;
-      llvm::raw_string_ostream rso(message);
-      rso << *failOp << "\n";
-      rso << i << " Occupied PE: " << occupied.val << " at " << occupied.pe
-          << " by producer\n";
-      logMessage(rso.str());
+      if (DebugMode) {
+        std::string message;
+        llvm::raw_string_ostream rso(message);
+        rso << *failOp << "\n";
+        rso << i << " Occupied PE: " << occupied.val << " at " << occupied.pe
+            << " by producer\n";
+        logMessage(rso.str());
+      }
       //  if the producer PE is occupied by other value, we need to route the
       //  other value
       bool blockPop = false;
@@ -1897,7 +1911,7 @@ int BasicBlockOpAssignment::createRoutePath(
     if (occupied.val == nullptr)
       avaiPEs.insert(i);
   }
-  if (!blockedProdPEs.empty()) {
+  if (!blockedProdPEs.empty() && DebugMode) {
     logMessage("Blocked PE :" + std::to_string(blockedProdPEs[0]));
     return -1;
   }
@@ -2076,17 +2090,6 @@ void BasicBlockOpAssignment::updateSchedulePriority(
                               std::max(oldPriority.second, priority.second)};
     }
   }
-
-  std::string message;
-  llvm::raw_string_ostream rso(message);
-  for (auto [op, priority] : schedulePriority) {
-    rso << "Schedule Priority: " << *op << " [" << priority.first << " "
-        << priority.second << "]";
-    if (solution.count(op))
-      rso << " : " << solution.at(op).time << " " << solution.at(op).pe;
-    rso << "\n";
-  }
-  logMessage(rso.str());
 }
 
 void BasicBlockOpAssignment::updateCDFG(Block *scheduleBB,
@@ -2148,10 +2151,12 @@ double BasicBlockOpAssignment::stepSA(
   // get the total cost
   double currentCost = sucCost + affinityCost + accessCost + localPopCost;
 
-  logMessage("cost: " + std::to_string(sucCost) + " + " +
-             std::to_string(affinityCost) + " + " + std::to_string(accessCost) +
-             " + " + std::to_string(localPopCost) + " = " +
-             std::to_string(currentCost) + "\n");
+  if (DebugMode)
+    logMessage("cost: " + std::to_string(sucCost) + " + " +
+               std::to_string(affinityCost) + " + " +
+               std::to_string(accessCost) + " + " +
+               std::to_string(localPopCost) + " = " +
+               std::to_string(currentCost) + "\n");
   return currentCost;
 }
 
@@ -2165,14 +2170,15 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
   int rollBackHeight = height;
   int longestRoutePath = 0;
   for (auto op : graphTransformedOps) {
-    logMessage("Try to solve the graph transformation");
+    logMessage("Try to solve the graph transformation", false, DebugMode);
     unsigned producerNum = op->getNumOperands();
     std::vector<ValuePlacement> producers;
     std::vector<unsigned> movs;
     // detect whether the operation is routable
     int routable = createRoutePath(op, producers, movs, curGraph, finiGraph,
                                    graphTransformedOps);
-    logMessage("routable: " + std::to_string(routable) + "\n");
+    logMessage("routable: " + std::to_string(routable) + "\n", false,
+               DebugMode);
     if (routable >= 0) {
       longestRoutePath = std::max(
           longestRoutePath, (int)*std::max_element(movs.begin(), movs.end()));
@@ -2195,28 +2201,31 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         }
         rollBackHeight = std::min(rollBackHeight, earliestTime);
 
-        logMessage("Route producers\n");
+        logMessage("Route producers\n", false, DebugMode);
         unsigned newRouteOpsNum = 0;
         auto newRouteOps = routeOperation(producers, movs, op);
         newRouteOpsNum = newRouteOps.size();
-        rso << "Warning: Route for: " << *op << "\n";
         transformed = true;
         // if the op is already a route operation, but not scheduled, don't
         // create new route ops
         // updateSchedulePriority(height, liveIns, liveOuts);
+        if (DebugMode)
+          rso << "Warning: Route for: " << *op << "\n";
         for (size_t i = 0; i < producers.size(); ++i) {
           auto producer = producers[i];
           auto movNum = movs[i];
-          rso << "    route: " << producer.val << " :" << movNum << "\n";
+          if (DebugMode)
+            rso << "    route: " << producer.val << " :" << movNum << "\n";
         }
         totalOpNum += newRouteOpsNum;
-        logMessage(rso.str());
+        logMessage(rso.str(), false, DebugMode);
       }
       // otherwise, route the operation itself
       if (routable == 1) {
-        logMessage("Route to consumer\n");
-        rso << "Warning: Route liveout: " << *op;
-        logMessage(rso.str());
+        logMessage("Route to consumer\n", false, DebugMode);
+        if (DebugMode)
+          rso << "Warning: Route liveout: " << *op;
+        logMessage(rso.str(), false, DebugMode);
         if (op->getNumResults() > 0 && liveout.count(op->getResult(0)) > 0) {
           auto newLiveOut = createAtomicMovOp(op->getResult(0), false, false);
           // replace the use if it is used outside the block
@@ -2246,12 +2255,14 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         }
       }
     } else {
-      std::string message;
-      llvm::raw_string_ostream rso(message);
-      // check whether pop the blocked PE can solve the problem
-      rso << "Warning: Cannot route for: " << *op
-          << ", the graph transformation is needed.\n";
-      logMessage(rso.str());
+      if (DebugMode) {
+        std::string message;
+        llvm::raw_string_ostream rso(message);
+        // check whether pop the blocked PE can solve the problem
+        rso << "Warning: Cannot route for: " << *op
+            << ", the graph transformation is needed.\n";
+        logMessage(rso.str());
+      }
 
       SetVector<unsigned> avaiPEs;
       for (auto i = 0; i < attr.nRow * attr.nCol; i++) {
@@ -2284,12 +2295,14 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         }
 
         transformed = true;
-        // log the block Place
-        std::string message;
-        llvm::raw_string_ostream rso1(message);
-        rso << "Blocked PE: " << blockPlace.val << " ^^^ " << blockPlace.pe
-            << "\n";
-        logMessage(rso1.str());
+        if (DebugMode) {
+          // log the block Place
+          std::string message;
+          llvm::raw_string_ostream rso1(message);
+          rso1 << "Blocked PE: " << blockPlace.val << " ^^^ " << blockPlace.pe
+               << "\n";
+          logMessage(rso1.str());
+        }
         // builder.setInsertionPoint
         auto freePEOp = createAtomicMovOp(blockPlace.val, false, false);
         newRouteOpsNum++;
@@ -2305,9 +2318,9 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
             });
       }
       if (!routeBlockSuccess) {
-        rso << "Error: Failed to route the blocked PEs, graph "
-               "transformation is needed.\n";
-        // TODO[@Y]: split the graph via DFG
+        logMessage("Error: Failed to route the blocked PEs, graph "
+                   "transformation is needed.\n",
+                   false, DebugMode);
         return failure();
       }
       totalOpNum += newRouteOpsNum;
@@ -2352,7 +2365,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     rso << *op << " [" << priority.first << " " << priority.second << "]";
     rso << "\n";
   }
-  logMessage(rso.str());
+  logMessage(rso.str(), false, DebugMode);
 
   int height = 1;
 
@@ -2362,18 +2375,21 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
   transformGraphs[0] = initGraph;
   while (scheduledOps.size() < totalOpNum && maxTry < 30) {
     maxTry++;
-    logMessage("----height: " + std::to_string(height) + "----\n");
+    logMessage("----height: " + std::to_string(height) + "----\n", false,
+               DebugMode);
 
     auto schedulingOps = getScheduleOps(curBlock, height, schedulePriority,
                                         scheduledOps, strategy);
     // log schedulingOps
-    std::string message;
-    llvm::raw_string_ostream totalRso(message);
-    totalRso << "Scheduling Operations at height " << height << ": ";
-    for (auto op : schedulingOps) {
-      totalRso << *op << "\n";
+    if (DebugMode) {
+      std::string message;
+      llvm::raw_string_ostream totalRso(message);
+      totalRso << "Scheduling Operations at height " << height << ": ";
+      for (auto op : schedulingOps) {
+        totalRso << *op << "\n";
+      }
+      logMessage(totalRso.str());
     }
-    logMessage(totalRso.str());
 
     std::map<Operation *, ScheduleUnit> tmpScheduleResult;
     std::map<Operation *, std::vector<placeunit>> searchSpace;
@@ -2440,7 +2456,8 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
 
       previousCost = currentCost;
     }
-    logMessage("Best cost: " + std::to_string(bestCost) + "\n");
+    logMessage("Best cost: " + std::to_string(bestCost) + "\n", false,
+               DebugMode);
 
     // post simulated annealing, check whether graph transformation is needed
     SmallVector<Operation *, 4> graphTransformedOps;
@@ -2469,13 +2486,14 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
         }
         graphScheduleBefore = transformGraphs[rollbackHeight - 1];
         height = rollbackHeight;
-        logMessage("Rollback to height: " + std::to_string(height) + "\n");
+        logMessage("Rollback to height: " + std::to_string(height) + "\n",
+                   false, DebugMode);
         continue;
       }
     }
 
     // prepare scheduling for the next layer
-    logMessage("Time = " + std::to_string(height));
+    logMessage("Time = " + std::to_string(height), false, DebugMode);
     for (auto [op, res] : layerScheduleResult) {
       // remove it from the schedulingOps
       auto it = std::find(schedulingOps.begin(), schedulingOps.end(), op);
@@ -2484,30 +2502,31 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
       solution[op] = res;
 
       // log the final placement info
-      std::string message;
-      llvm::raw_string_ostream rso(message);
-      rso << "SCHEDULE RESULT: " << *op << " ---> " << std::to_string(res.pe)
-          << "\n";
-      logMessage(rso.str());
+      if (DebugMode) {
+        std::string message;
+        llvm::raw_string_ostream rso(message);
+        rso << "SCHEDULE RESULT: " << *op << " ---> " << std::to_string(res.pe)
+            << "\n";
+        logMessage(rso.str());
+      }
     }
     graphScheduleBefore = graphScheduleAfter;
     transformGraphs[height] = graphScheduleBefore;
     // log graphScheduleBefore
-    std::string curGraph;
-    llvm::raw_string_ostream rso(curGraph);
-    rso << "Graph Schedule Before:\n";
-    for (auto place : graphScheduleBefore) {
-      rso << "  " << place.val << " at PE: " << place.pe
-          << " RegAttr: " << static_cast<int>(place.regAttr) << "\n";
+    if (DebugMode) {
+      std::string curGraph;
+      llvm::raw_string_ostream rso(curGraph);
+      rso << "Graph Schedule Before:\n";
+      for (auto place : graphScheduleBefore) {
+        rso << "  " << place.val << " at PE: " << place.pe
+            << " RegAttr: " << static_cast<int>(place.regAttr) << "\n";
+      }
+      logMessage(rso.str());
     }
-    logMessage(rso.str());
 
     for (auto op : schedulingOps) {
       // delay the scheduling
       schedulePriority[op].first += 1;
-      std::string message;
-      llvm::raw_string_ostream rso(message);
-      rso << "DELAY SCHEDULE: " << *op << "\n";
     }
     updateSchedulePriority(height, liveIns, liveOuts);
     height++;
