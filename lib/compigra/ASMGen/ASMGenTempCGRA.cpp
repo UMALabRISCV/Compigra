@@ -28,57 +28,6 @@
 using namespace mlir;
 using namespace compigra;
 
-static bool isSameAddr(cgra::LwiOp loadOp, cgra::SwiOp storeOp,
-                       bool strict = true) {
-
-  // if the load and store operations address are all arith::ConstantOp
-  // and unequal, continue the check
-  if (auto storeAddr =
-          storeOp.getOperand(1).getDefiningOp<arith::ConstantOp>()) {
-    if (auto loadAddr =
-            loadOp.getOperand().getDefiningOp<arith::ConstantOp>()) {
-      if (storeAddr.getValue().cast<IntegerAttr>().getInt() !=
-          loadAddr.getValue().cast<IntegerAttr>().getInt())
-        return !strict;
-    }
-  }
-}
-
-static bool memoryConsistencySchedule(const std::map<int, int> opExecTime,
-                                      unsigned II, Block *scheduleBB) {
-  // Get all store operations which must separate the load operations
-  auto storeOps = scheduleBB->getOps<cgra::SwiOp>();
-  unsigned startOpId = scheduleBB->getArguments().size();
-  for (auto storeOp : storeOps) {
-    // get storeOp Id in the block
-    int storeOpId = getOpId(scheduleBB->getOperations(), storeOp) + startOpId;
-    auto bound = opExecTime.at(storeOpId);
-    // check whether all load id < storeOpId, the execution time of load is
-    // smaller than the store, and vice versa
-    auto loadOps = scheduleBB->getOps<cgra::LwiOp>();
-    for (auto loadOp : loadOps) {
-      int loadOpId = getOpId(scheduleBB->getOperations(), loadOp) + startOpId;
-      auto loadExecTime = opExecTime.at(loadOpId);
-
-      if (loadOpId < storeOpId) {
-        if (loadExecTime >= bound || loadExecTime + II <= bound) {
-          if (!isSameAddr(loadOp, storeOp, false))
-            continue;
-          return false;
-        }
-      }
-
-      if (loadOpId > storeOpId) {
-        if (!isSameAddr(loadOp, storeOp, false))
-          continue;
-        if (loadExecTime <= bound || loadExecTime - II >= bound)
-          return false;
-      }
-    }
-  }
-  return true;
-}
-
 static LogicalResult preScheduleUsingModuloScheduler(
     TemporalCGRAScheduler &scheduler, func::FuncOp funcOp,
     std::string outputDAG, std::string pythonExectuable, Region &r,
@@ -127,13 +76,6 @@ static LogicalResult preScheduleUsingModuloScheduler(
                            basicBlocksWithOpIds, instructions)))
       continue;
 
-    // print instructions
-    for (auto [id, inst] : instructions) {
-      llvm::errs() << "Id: " << id << ", Name: " << inst.name
-                   << ", Time: " << inst.time << ", PE: " << inst.pe
-                   << ", Rout: " << inst.Rout << ", OpA: " << inst.opA
-                   << ", OpB: " << inst.opB << "\n";
-    }
     std::map<int, int> execTime = getLoopOpUnfoldExeTime(opTimeMap);
     if (!memoryConsistencySchedule(execTime, II, &blk) ||
         !kernelOverlap(basicBlocksWithOpIds))
@@ -182,7 +124,7 @@ struct ASMGenTemporalCGRAPass
     Region &region = funcOp.getBody();
     OpBuilder builder(funcOp);
 
-    unsigned maxReg = 4;
+    unsigned maxReg = 5;
     TemporalCGRAScheduler scheduler(region, maxReg, nRow, nCol, builder);
     scheduler.setReserveMem(mem);
 
@@ -211,7 +153,6 @@ struct ASMGenTemporalCGRAPass
     // scheduler.readScheduleResult("temporalSpatialSchedule.csv");
     OpenEdgeASMGen asmGen(region, maxReg, nRow);
     asmGen.setSolution(scheduler.getSolution());
-    asmGen.setRFAccessModel(RFAccessModel::RF_READ);
     if (failed(asmGen.allocateRegisters(scheduler.knownRes))) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();

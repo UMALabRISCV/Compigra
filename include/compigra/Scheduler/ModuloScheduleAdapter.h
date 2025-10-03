@@ -29,6 +29,9 @@
 using namespace mlir;
 
 namespace compigra {
+bool memoryConsistencySchedule(const std::map<int, int> opExecTime, unsigned II,
+                               Block *scheduleBB);
+                               
 unsigned getOpId(Block::OpListType &opList, Operation *search);
 
 /// Data structure to map the operation id to the operation

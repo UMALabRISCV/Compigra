@@ -754,12 +754,12 @@ static LogicalResult preScheduleWithExternalSupport(
                           "/out_raw_bb" + std::to_string(bbInd) + ".sat\n";
 
     // call the python code script to solve the MS
-    llvm::errs() << "---> Running the SAT-Solver: \n" << command;
+    llvm::errs() << "---> Running the Modulo Scheduler: \n" << command;
 
     int result = system(command.c_str());
     if (result != 0)
       continue;
-    llvm::errs() << "SAT-solver done\n";
+    llvm::errs() << "Modulo Scheduler done\n";
     int opSize = blk.getOperations().size();
 
     int II;
@@ -771,8 +771,17 @@ static LogicalResult preScheduleWithExternalSupport(
                            basicBlocksWithOpIds, instructions)))
       continue;
 
+    // print instructions
+    for (auto [id, inst] : instructions) {
+      llvm::errs() << "Id: " << id << ", Name: " << inst.name
+                   << ", Time: " << inst.time << ", PE: " << inst.pe
+                   << ", Rout: " << inst.Rout << ", OpA: " << inst.opA
+                   << ", OpB: " << inst.opB << "\n";
+    }
+
     std::map<int, int> execTime = getLoopOpUnfoldExeTime(opTimeMap);
-    if (!kernelOverlap(basicBlocksWithOpIds))
+    if (!memoryConsistencySchedule(execTime, II, &blk) ||
+        !kernelOverlap(basicBlocksWithOpIds))
       continue;
 
     llvm::errs() << "II: " << II << "\n\n";
@@ -788,8 +797,8 @@ static LogicalResult preScheduleWithExternalSupport(
       return failure();
 
     // assign basic block with the schedule result
-    if (failed(adapter.assignScheduleResult(instructions, maxReg,
-                                            peGridSize * peGridSize)))
+    if (failed(adapter.assignScheduleResult(instructions, schedulerRequirements,
+                                            maxReg, peGridSize * peGridSize)))
       return failure();
     auto prereq = adapter.getPrerequisites();
     schedulerRequirements.insert(schedulerRequirements.end(), prereq.begin(),
@@ -1006,6 +1015,7 @@ struct FastASMGenTemporalCGRAPass
         region, rawSolution, "space_temporal_assignment.csv", blasLatency);
 
     asmGen.setSolution(rawSolution);
+    asmGen.setRFAccessModel(RFAccessModel::RF_READ);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();

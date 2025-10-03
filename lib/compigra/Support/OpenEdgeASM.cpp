@@ -954,8 +954,9 @@ std::string OpenEdgeASMGen::printInstructionToISA(Operation *op,
     } else {
       int predicatePE = instSolution[cntOp].pe;
       addition =
-          ", " + getOperandSrcReg(instSolution[op].pe, instSolution[cntOp].pe,
-                                  instSolution[cntOp].Rout, nRow, nCol, maxReg);
+          getOperandSrcReg(instSolution[op].pe, instSolution[cntOp].pe,
+                           instSolution[cntOp].Rout, nRow, nCol, maxReg) +
+          ",";
     }
   }
 

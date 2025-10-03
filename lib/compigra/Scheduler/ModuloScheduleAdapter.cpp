@@ -21,6 +21,57 @@
 using namespace mlir;
 using namespace compigra;
 
+static bool isSameAddr(cgra::LwiOp loadOp, cgra::SwiOp storeOp,
+                       bool strict = true) {
+
+  // if the load and store operations address are all arith::ConstantOp
+  // and unequal, continue the check
+  if (auto storeAddr =
+          storeOp.getOperand(1).getDefiningOp<arith::ConstantOp>()) {
+    if (auto loadAddr =
+            loadOp.getOperand().getDefiningOp<arith::ConstantOp>()) {
+      if (storeAddr.getValue().cast<IntegerAttr>().getInt() !=
+          loadAddr.getValue().cast<IntegerAttr>().getInt())
+        return !strict;
+    }
+  }
+}
+
+bool compigra::memoryConsistencySchedule(const std::map<int, int> opExecTime,
+                                         unsigned II, Block *scheduleBB) {
+  // Get all store operations which must separate the load operations
+  auto storeOps = scheduleBB->getOps<cgra::SwiOp>();
+  unsigned startOpId = scheduleBB->getArguments().size();
+  for (auto storeOp : storeOps) {
+    // get storeOp Id in the block
+    int storeOpId = getOpId(scheduleBB->getOperations(), storeOp) + startOpId;
+    auto bound = opExecTime.at(storeOpId);
+    // check whether all load id < storeOpId, the execution time of load is
+    // smaller than the store, and vice versa
+    auto loadOps = scheduleBB->getOps<cgra::LwiOp>();
+    for (auto loadOp : loadOps) {
+      int loadOpId = getOpId(scheduleBB->getOperations(), loadOp) + startOpId;
+      auto loadExecTime = opExecTime.at(loadOpId);
+
+      if (loadOpId < storeOpId) {
+        if (loadExecTime >= bound || loadExecTime + II <= bound) {
+          if (!isSameAddr(loadOp, storeOp, false))
+            continue;
+          return false;
+        }
+      }
+
+      if (loadOpId > storeOpId) {
+        if (!isSameAddr(loadOp, storeOp, false))
+          continue;
+        if (loadExecTime <= bound || loadExecTime - II >= bound)
+          return false;
+      }
+    }
+  }
+  return true;
+}
+
 /// Get the init block of the region
 Block *ModuloScheduleAdapter::getInitBlock(Block *loopBlk) {
   // if there is only one predecessor different from the loop block, return it,
@@ -419,6 +470,7 @@ void ModuloScheduleAdapter::removeBlockArgs(Operation *term,
                                             std::vector<unsigned> argId,
                                             Block *dest) {
   builder.setInsertionPoint(term);
+  OpBuilder::InsertionGuard guard(builder);
   if (auto br = dyn_cast<cf::BranchOp>(term)) {
     SmallVector<Value> operands;
     for (auto [ind, opr] : llvm::enumerate(br->getOperands())) {
@@ -444,16 +496,28 @@ void ModuloScheduleAdapter::removeBlockArgs(Operation *term,
       if (condBr.getFalseDest() != dest ||
           std::find(argId.begin(), argId.end(), ind) == argId.end())
         falseOperands.push_back(opr);
-    builder.create<cgra::ConditionalBranchOp>(
+    auto newTerm = builder.create<cgra::ConditionalBranchOp>(
         term->getLoc(), condBr.getPredicate(), condBr.getOperand(0),
         condBr.getOperand(1), condBr.getTrueDest(), trueOperands,
         condBr.getFalseDest(), falseOperands);
+    llvm::errs() << "AFTER ARGUMENT REMOVE " << *newTerm << "\n";
     term->erase();
     return;
   }
 }
 
 void ModuloScheduleAdapter::removeUselessBlockArg() {
+  // First pass: collect all transformations needed
+  struct BlockArgRemoval {
+    Block *block;
+    Operation *prevTerm;
+    std::vector<Value> replacementValues;
+    std::vector<unsigned> argId;
+    unsigned oprIndBase;
+  };
+
+  std::vector<BlockArgRemoval> removals;
+
   for (auto &block : region) {
     if (block.isEntryBlock())
       continue;
@@ -462,32 +526,93 @@ void ModuloScheduleAdapter::removeUselessBlockArg() {
                       block.getPredecessors().end()) > 1)
       continue;
 
-    // the block has only one predecessor and have arguments
-    // get the corresponding value in the predecessor
     auto prevTerm = (*block.getPredecessors().begin())->getTerminator();
-    auto oprIndBase = 0;
+    unsigned oprIndBase = 0;
     if (auto condBr = dyn_cast<cgra::ConditionalBranchOp>(prevTerm)) {
-      // the block is the false dest
       oprIndBase = 2;
       if (condBr.getFalseDest() == &block)
         oprIndBase += condBr.getTrueDestOperands().size();
     }
 
-    // find the corresponding value in the predecessor
+    // Collect replacement values and arg indices
+    std::vector<Value> replacementValues;
     std::vector<unsigned> argId;
     unsigned oprInd = 0;
-    for (auto arg : llvm::make_early_inc_range(block.getArguments())) {
-      arg.replaceAllUsesWith(prevTerm->getOperand(oprIndBase + oprInd));
+    for (auto arg : block.getArguments()) {
+      replacementValues.push_back(prevTerm->getOperand(oprIndBase + oprInd));
       argId.push_back(oprInd);
       oprInd++;
     }
-    // remove all block arguments
-    llvm::BitVector bitVec(argId.size(), true);
-    block.eraseArguments(bitVec);
 
-    removeBlockArgs(prevTerm, argId, &block);
+    removals.push_back(BlockArgRemoval{&block, prevTerm,
+                                       std::move(replacementValues),
+                                       std::move(argId), oprIndBase});
+  }
+
+  // Second pass: apply all transformations
+  std::map<Block *, llvm::BitVector> blockArgUsage;
+
+  for (auto &removal : removals) {
+    // Replace uses BEFORE modifying terminator
+    unsigned oprInd = 0;
+    for (auto arg : removal.block->getArguments()) {
+      arg.replaceAllUsesWith(removal.replacementValues[oprInd]);
+      oprInd++;
+    }
+
+    // Now remove the block args from predecessor terminator
+    removeBlockArgs(removal.prevTerm, removal.argId, removal.block);
+
+    llvm::BitVector bitVec(removal.argId.size(), true);
+    blockArgUsage[removal.block] = bitVec;
+  }
+
+  // Third pass: erase the arguments
+  for (auto [blk, bitVec] : blockArgUsage) {
+    blk->eraseArguments(bitVec);
   }
 }
+
+// void ModuloScheduleAdapter::removeUselessBlockArg() {
+//   std::map<Block *, llvm::BitVector> blockArgUsage;
+//   for (auto &block : region) {
+//     if (block.isEntryBlock())
+//       continue;
+//     if (block.getArguments().size() == 0 ||
+//         std::distance(block.getPredecessors().begin(),
+//                       block.getPredecessors().end()) > 1)
+//       continue;
+
+//     // the block has only one predecessor and have arguments
+//     // get the corresponding value in the predecessor
+//     auto prevTerm = (*block.getPredecessors().begin())->getTerminator();
+//     auto oprIndBase = 0;
+//     if (auto condBr = dyn_cast<cgra::ConditionalBranchOp>(prevTerm)) {
+//       // the block is the false dest
+//       oprIndBase = 2;
+//       if (condBr.getFalseDest() == &block)
+//         oprIndBase += condBr.getTrueDestOperands().size();
+//     }
+
+//     // find the corresponding value in the predecessor
+//     std::vector<unsigned> argId;
+//     unsigned oprInd = 0;
+//     for (auto arg : llvm::make_early_inc_range(block.getArguments())) {
+//       arg.replaceAllUsesWith(prevTerm->getOperand(oprIndBase + oprInd));
+//       argId.push_back(oprInd);
+//       oprInd++;
+//     }
+//     // remove all block arguments
+//     removeBlockArgs(prevTerm, argId, &block);
+
+//     llvm::BitVector bitVec(argId.size(), true);
+//     blockArgUsage[&block] = bitVec;
+//   }
+//   // remove all useless block arguments
+//   for (auto [blk, bitVec] : blockArgUsage) {
+//     blk->eraseArguments(bitVec);
+//   }
+// }
 
 static int existBlockArgument(std::vector<int> argIds, int id) {
   for (auto [blkArg, opId] : llvm::enumerate(argIds)) {
@@ -805,6 +930,7 @@ LogicalResult ModuloScheduleAdapter::adaptCFGWithLoopMS() {
       auto termOp = builder.create<cgra::ConditionalBranchOp>(
           curBlk->getOperations().back().getLoc(), cmpFlag, cmpOpr1, cmpOpr2,
           loopCond, contArgs, loopQuit, finiArgs);
+      // llvm::errs() << *termOp << "\n";
       newTerminator = termOp;
 
       if (bbId != loopBlkId + 1 &&
@@ -817,6 +943,7 @@ LogicalResult ModuloScheduleAdapter::adaptCFGWithLoopMS() {
     }
 
     prologOps[termIterId][loopOpNum - 1] = newTerminator;
+    // llvm::errs() << *newTerminator << "\n";
     curBlk = loopCond;
 
     if (bbId == loopBlkId + 1)
