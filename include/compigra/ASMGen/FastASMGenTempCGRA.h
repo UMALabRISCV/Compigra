@@ -30,7 +30,8 @@ namespace compigra {
 #include "compigra/ASMGen/Passes.h.inc"
 std::unique_ptr<mlir::Pass>
 createFastASMGenTemporalCGRA(int nRow = 3, int nCol = 3, int mem = 0,
-                             StringRef msOpt = "", StringRef asmOutDir = "");
+                             StringRef msOpt = "", StringRef asmOutDir = "",
+                             bool debug = false);
 } // namespace compigra
 
 #endif // FAST_ASM_GEN_TEMPORAL_CGRA_H

@@ -19,7 +19,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
 using namespace mlir;
-void logMessage(const std::string &message, bool overwrite = false);
+void logMessage(const std::string &message, bool overwrite = false,
+                bool debug = true);
 
 void computeLiveValue(Region &region,
                       std::map<Block *, SetVector<Value>> &liveIns,
@@ -209,6 +210,7 @@ private:
       std::vector<compigra::ValuePlacement> &finiGraph);
 
 public:
+  bool DebugMode = true;
   void setPrerequisiteToStartGraph(std::vector<ValuePlacement> initGraph) {
     this->startEmbeddingGraph = initGraph;
   }

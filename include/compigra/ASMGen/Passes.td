@@ -32,6 +32,8 @@ def FastASMGenTemporalCGRA : Pass<"gen-openedge-asm-fast"> {
            "  Executable of modulo scheduler">,
     Option<"asmOutDir", "asm-out", "std::string", "",
            "  Specify the directory of the assembly file">,
+    Option<"debug", "debug", "bool", "false",
+           "  Enable debug mode to print more information">,
   ];
 }
 

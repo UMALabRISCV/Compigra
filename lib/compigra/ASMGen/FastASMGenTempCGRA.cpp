@@ -833,7 +833,8 @@ struct FastASMGenTemporalCGRAPass
           FastASMGenTemporalCGRAPass> {
 
   explicit FastASMGenTemporalCGRAPass(int nRow, int nCol, int mem,
-                                      StringRef msOpt, StringRef asmOutDir) {}
+                                      StringRef msOpt, StringRef asmOutDir,
+                                      bool debug) {}
 
   void runOnOperation() override {
     ModuleOp modOp = dyn_cast<ModuleOp>(getOperation());
@@ -885,19 +886,24 @@ struct FastASMGenTemporalCGRAPass
     for (auto &bb : region.getBlocks()) {
       llvm::errs() << "\n";
       logMessage("\nBBId: " + std::to_string(bbId) +
-                 "==============================\n");
+                     "==============================\n",
+                 false, debug);
 
       llvm::errs() << "BBId: " + std::to_string(bbId) +
                           "==============================\n";
       bbId++;
 
-      logMessage("InitGraph: ");
-      printLiveGraph(bbInitGraphs);
-      logMessage("FiniGraph:");
-      printLiveGraph(bbFiniGraphs);
+      logMessage("InitGraph: ", false, debug);
+      if (debug)
+        printLiveGraph(bbInitGraphs);
+      logMessage("FiniGraph:", false, debug);
+      if (debug)
+        printLiveGraph(bbFiniGraphs);
 
       // Init operation assginer
       BasicBlockOpAssignment bbOpAssignment(&bb, maxReg, nRow, nCol, builder);
+      bbOpAssignment.DebugMode = debug;
+      llvm::errs() << "DEBUG MODE: " << debug << "\n";
       auto zeroIntOp = getZeroConstant(region, builder);
       auto zeroFloatOp = getZeroConstant(region, builder, true);
       bbOpAssignment.setUpZeroOp(zeroIntOp, zeroFloatOp);
@@ -976,10 +982,12 @@ struct FastASMGenTemporalCGRAPass
       // computeLiveValue(region, liveIns, liveOuts);
       updateGlobalValPlacement(&bb, region, liveIns, liveOuts, bbInitGraphs,
                                bbFiniGraphs, msEnable);
-      logMessage("InitGraph: ");
-      printLiveGraph(bbInitGraphs);
-      logMessage("FiniGraph:");
-      printLiveGraph(bbFiniGraphs);
+      logMessage("InitGraph: ", false, debug);
+      if (debug)
+        printLiveGraph(bbInitGraphs);
+      logMessage("FiniGraph:", false, debug);
+      if (debug)
+        printLiveGraph(bbFiniGraphs);
 
       // if (bbId == 4)
       //   break;
@@ -1018,11 +1026,10 @@ struct FastASMGenTemporalCGRAPass
 } // namespace
 
 namespace compigra {
-std::unique_ptr<mlir::Pass> createFastASMGenTemporalCGRA(int nRow, int nCol,
-                                                         int mem,
-                                                         StringRef msOpt,
-                                                         StringRef asmOutDir) {
+std::unique_ptr<mlir::Pass>
+createFastASMGenTemporalCGRA(int nRow, int nCol, int mem, StringRef msOpt,
+                             StringRef asmOutDir, bool debug) {
   return std::make_unique<FastASMGenTemporalCGRAPass>(nRow, nCol, mem, msOpt,
-                                                      asmOutDir);
+                                                      asmOutDir, debug);
 }
 } // namespace compigra
