@@ -1,4 +1,6 @@
 .vscode/*
 build/*
 *.sat
-benchmarks/*
+*.mlir
+*.sat
+*/satmapit/*
