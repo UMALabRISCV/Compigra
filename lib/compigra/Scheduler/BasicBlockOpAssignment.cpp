@@ -13,6 +13,7 @@
 
 #include "compigra/Scheduler/BasicBlockOpAssignment.h"
 #include "compigra/CgraOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <fstream>
 #include <numeric>
 #include <queue>
@@ -2259,8 +2260,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         std::string message;
         llvm::raw_string_ostream rso(message);
         // check whether pop the blocked PE can solve the problem
-        rso << "Warning: Cannot route for: " << *op
-            << ", the graph transformation is needed.\n";
+        rso << "Warning: Cannot route for: " << *op << "due to block.\n";
         logMessage(rso.str());
       }
 
@@ -2494,9 +2494,16 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
 
     // prepare scheduling for the next layer
     logMessage("Time = " + std::to_string(height), false, DebugMode);
+    bool scheduleDone =
+        scheduledOps.size() + layerScheduleResult.size() == totalOpNum;
     for (auto [op, res] : layerScheduleResult) {
       // remove it from the schedulingOps
       auto it = std::find(schedulingOps.begin(), schedulingOps.end(), op);
+      if (!scheduleDone && (isa<func::ReturnOp>(op) || isa<cf::BranchOp>(op) ||
+                            isa<cgra::ConditionalBranchOp>(op))) {
+        continue;
+      }
+
       schedulingOps.erase(it);
       scheduledOps.insert(op);
       solution[op] = res;
