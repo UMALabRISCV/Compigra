@@ -352,11 +352,82 @@ struct ArithCmpIOpConversion : OpConversionPattern<arith::CmpIOp> {
   }
 };
 
+// template <typename MemRefOp>
+// Operation *computeOffSet(MemRefOp memOp, Operation *baseAddr,
+//                          SmallVector<Operation *> strideVals,
+//                          ConversionPatternRewriter &rewriter) {
+//   Operation *offSet = nullptr;
+
+//   for (auto [dim, indice] : llvm::enumerate(memOp.getIndices())) {
+//     // if indice is a constant 0, skip
+//     if (auto constantOp =
+//             dyn_cast_or_null<arith::ConstantIndexOp>(indice.getDefiningOp()))
+//             {
+//       if (constantOp.value() == 0) {
+//         continue;
+//       }
+//     }
+
+//     auto castOp = rewriter.create<arith::IndexCastOp>(
+//         memOp.getLoc(), rewriter.getIntegerType(32), indice);
+//     if (dim == memOp.getIndices().size() - 1) {
+//       if (offSet)
+//         offSet = rewriter.create<arith::AddIOp>(
+//             memOp.getLoc(), rewriter.getI32Type(), offSet->getResult(0),
+//             castOp.getResult());
+//       else
+//         offSet = castOp;
+//       break;
+//     }
+
+//     // Compute cumulative stride: product of all dimensions after current dim
+//     Operation *cumulativeStride = nullptr;
+//     for (size_t i = dim; i < strideVals.size(); ++i) {
+//       if (cumulativeStride) {
+//         cumulativeStride = rewriter.create<arith::MulIOp>(
+//             memOp.getLoc(), rewriter.getI32Type(),
+//             cumulativeStride->getResult(0), strideVals[i]->getResult(0));
+//       } else {
+//         cumulativeStride = strideVals[i];
+//       }
+//     }
+//     Value stride = strideVals[dim]->getResult(0);
+//     auto dimStride = rewriter.create<arith::MulIOp>(
+//         memOp.getLoc(), rewriter.getI32Type(), castOp.getResult(),
+//         cumulativeStride->getResult(0));
+//     if (offSet)
+//       offSet = rewriter.create<arith::AddIOp>(
+//           memOp.getLoc(), rewriter.getI32Type(), offSet->getResult(0),
+//           dimStride->getResult(0));
+//     else
+//       offSet = dimStride;
+//   }
+
+//   return offSet;
+// }
+
 template <typename MemRefOp>
 Operation *computeOffSet(MemRefOp memOp, Operation *baseAddr,
                          SmallVector<Operation *> strideVals,
                          ConversionPatternRewriter &rewriter) {
   Operation *offSet = nullptr;
+
+  // Pre-compute cumulative strides as constant values
+  SmallVector<Operation *> cumulativeStrides;
+  for (size_t dim = 0; dim < strideVals.size(); ++dim) {
+    int64_t strideProduct = 1;
+    for (size_t i = dim; i < strideVals.size(); ++i) {
+      // Extract constant value from the operation
+      auto constOp = dyn_cast<arith::ConstantOp>(strideVals[i]);
+      int64_t val = constOp.getValue().cast<IntegerAttr>().getInt();
+      strideProduct *= val;
+    }
+    // Create a single constant operation for the cumulative stride
+    auto cumulativeStride = rewriter.create<arith::ConstantOp>(
+        memOp.getLoc(), rewriter.getI32Type(),
+        rewriter.getI32IntegerAttr(strideProduct));
+    cumulativeStrides.push_back(cumulativeStride);
+  }
 
   for (auto [dim, indice] : llvm::enumerate(memOp.getIndices())) {
     // if indice is a constant 0, skip
@@ -369,6 +440,7 @@ Operation *computeOffSet(MemRefOp memOp, Operation *baseAddr,
 
     auto castOp = rewriter.create<arith::IndexCastOp>(
         memOp.getLoc(), rewriter.getIntegerType(32), indice);
+
     if (dim == memOp.getIndices().size() - 1) {
       if (offSet)
         offSet = rewriter.create<arith::AddIOp>(
@@ -379,9 +451,9 @@ Operation *computeOffSet(MemRefOp memOp, Operation *baseAddr,
       break;
     }
 
-    Value stride = strideVals[dim]->getResult(0);
     auto dimStride = rewriter.create<arith::MulIOp>(
-        memOp.getLoc(), rewriter.getI32Type(), castOp.getResult(), stride);
+        memOp.getLoc(), rewriter.getI32Type(), castOp.getResult(),
+        cumulativeStrides[dim]->getResult(0));
     if (offSet)
       offSet = rewriter.create<arith::AddIOp>(
           memOp.getLoc(), rewriter.getI32Type(), offSet->getResult(0),
