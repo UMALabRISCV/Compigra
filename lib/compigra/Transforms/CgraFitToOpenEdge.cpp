@@ -703,8 +703,45 @@ LogicalResult LwiOpRewrite::matchAndRewrite(cgra::LwiOp lwiOp,
   return success();
 }
 
+// Helper function to find convergence block using getBlockPath
+Block *findConvergenceBlock(Block *origBlock, Block *loadBlock) {
+  // The convergence point is where the back edge targets
+
+  // Get all successors of loadBlock to find potential back edge targets
+  llvm::SmallVector<Block *, 8> worklist;
+  llvm::SmallPtrSet<Block *, 8> visited;
+  worklist.push_back(loadBlock);
+
+  while (!worklist.empty()) {
+    Block *current = worklist.pop_back_val();
+    if (!visited.insert(current).second)
+      continue;
+
+    for (Block *succ : current->getSuccessors()) {
+      // Check if this successor is reachable from origBlock
+      auto pathFromOrig = getBlockPath(origBlock, succ);
+
+      // If succ is reachable from both origBlock and loadBlock, it's a
+      // convergence point
+      if (!pathFromOrig.empty()) {
+        // Verify this is actually where they converge by checking if loadBlock
+        // can reach it
+        auto pathFromLoad = getBlockPath(loadBlock, succ);
+        if (!pathFromLoad.empty()) {
+          return succ; // This is the convergence point (loop header)
+        }
+      }
+
+      worklist.push_back(succ);
+    }
+  }
+
+  return nullptr;
+}
+
 void reLoadFromMemory(int baseAddr, Value origVal, Block *blasInitBlk,
                       Block *blasFiniBlk, OpBuilder &builder) {
+  // Create the load operation in blasFiniBlk
   builder.setInsertionPointToStart(blasFiniBlk);
   auto addrCstlwd = builder.create<arith::ConstantOp>(
       blasFiniBlk->getTerminator()->getLoc(), builder.getI32Type(),
@@ -713,13 +750,114 @@ void reLoadFromMemory(int baseAddr, Value origVal, Block *blasInitBlk,
       builder.create<cgra::LwiOp>(blasFiniBlk->getTerminator()->getLoc(),
                                   origVal.getType(), addrCstlwd.getResult());
 
+  // Track blocks that need block arguments for back edge cases
+  llvm::DenseMap<Block *, BlockArgument> convergenceBlockArgs;
+
+  // Second pass: replace forward edge uses with lwiOp result
   origVal.replaceUsesWithIf(lwiOp.getResult(), [&](OpOperand &operand) {
     auto userBlk = operand.getOwner()->getBlock();
-    if (operand.getOwner()->getBlock() == origVal.getParentBlock())
+
+    // Don't replace if use is in the same block as origVal
+    if (userBlk == origVal.getParentBlock())
       return false;
+
     auto propPath = getBlockPath(blasInitBlk, userBlk);
+
+    // Only replace for forward edges (back edges already handled in first pass)
     return !propPath.empty() && !isBackEdge(blasInitBlk, userBlk);
   });
+
+  if (isa<BlockArgument>(origVal))
+    return; // No back edges to handle if origVal is a block argument
+
+  // First pass: handle back edges - create block arguments and replace uses
+  for (OpOperand &use : llvm::make_early_inc_range(origVal.getUses())) {
+    auto userBlk = use.getOwner()->getBlock();
+    auto propPath = getBlockPath(blasInitBlk, userBlk);
+
+    // Skip if use is in the same block as origVal
+    if (userBlk == origVal.getParentBlock())
+      continue;
+
+    // Handle back edge case: need block argument at convergence point
+    if (!propPath.empty() && isBackEdge(blasInitBlk, userBlk)) {
+
+      // Find convergence block using getBlockPath
+      Block *convergenceBlk =
+          findConvergenceBlock(origVal.getParentBlock(), blasFiniBlk);
+
+      if (convergenceBlk) {
+        BlockArgument blockArg;
+
+        // Check if we already created a block argument for this convergence
+        // block
+        auto it = convergenceBlockArgs.find(convergenceBlk);
+        if (it == convergenceBlockArgs.end()) {
+          // Add block argument to convergence block
+          blockArg =
+              convergenceBlk->addArgument(origVal.getType(), origVal.getLoc());
+          convergenceBlockArgs[convergenceBlk] = blockArg;
+
+          // Update predecessor blocks to pass the appropriate value
+          for (auto pred : convergenceBlk->getPredecessors()) {
+            auto *terminator = pred->getTerminator();
+            builder.setInsertionPoint(terminator);
+
+            // Determine which value to pass based on control flow path
+            Value valueToPass;
+            auto pathFromLoad = getBlockPath(blasFiniBlk, pred);
+
+            // If pred is reachable from blasFiniBlk (or is blasFiniBlk), pass
+            // lwiOp result Otherwise pass origVal (for initial entry into the
+            // loop)
+            if (!pathFromLoad.empty() || pred == blasFiniBlk) {
+              valueToPass = lwiOp.getResult();
+            } else {
+              // This is the initial entry path (e.g., from bb0 to bb1)
+              valueToPass = origVal;
+            }
+
+            // Update branch operation to pass the value
+            if (auto branchOp = dyn_cast<cf::BranchOp>(terminator)) {
+              SmallVector<Value> operands(branchOp.getDestOperands());
+              operands.push_back(valueToPass);
+              builder.create<cf::BranchOp>(terminator->getLoc(),
+                                           branchOp.getDest(), operands);
+              terminator->erase();
+            } else if (auto condBranchOp =
+                           dyn_cast<cgra::ConditionalBranchOp>(terminator)) {
+              if (condBranchOp.getTrueDest() == convergenceBlk) {
+                SmallVector<Value> trueOps(condBranchOp.getTrueDestOperands());
+                trueOps.push_back(valueToPass);
+                builder.create<cgra::ConditionalBranchOp>(
+                    terminator->getLoc(), condBranchOp.getPredicate(),
+                    condBranchOp.getOperand(0), condBranchOp.getOperand(1),
+                    condBranchOp.getTrueDest(), trueOps,
+                    condBranchOp.getFalseDest(),
+                    condBranchOp.getFalseDestOperands());
+                terminator->erase();
+              } else if (condBranchOp.getFalseDest() == convergenceBlk) {
+                SmallVector<Value> falseOps(
+                    condBranchOp.getFalseDestOperands());
+                falseOps.push_back(valueToPass);
+                builder.create<cgra::ConditionalBranchOp>(
+                    terminator->getLoc(), condBranchOp.getPredicate(),
+                    condBranchOp.getOperand(0), condBranchOp.getOperand(1),
+                    condBranchOp.getTrueDest(),
+                    condBranchOp.getTrueDestOperands(),
+                    condBranchOp.getFalseDest(), falseOps);
+                terminator->erase();
+              }
+            }
+          }
+        } else {
+          blockArg = it->second;
+        }
+
+        use.set(blockArg);
+      }
+    }
+  }
 }
 
 void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
@@ -762,6 +900,8 @@ void pushBLASkernelLiveValToMemory(Region &region, OpBuilder &builder) {
           builder.getI32IntegerAttr(baseAddr));
       builder.create<cgra::SwiOp>(initBlk->getTerminator()->getLoc(), val,
                                   addrCst.getResult());
+      llvm::errs() << "Store " << val << " to memory at address: " << baseAddr
+                   << "\n";
       reLoadFromMemory(baseAddr, val, initBlk, finiBlk, builder);
 
       baseAddr += 4;
@@ -825,6 +965,7 @@ void CgraFitToOpenEdgePass::runOnOperation() {
   }
 
   raiseCstOpGenOutLoop(funcOp);
+  llvm::errs() << funcOp << "\n";
   // print the DAG of the specified function
   if (!outputDAG.empty()) {
     size_t lastSlashPos = outputDAG.find_last_of("/");
