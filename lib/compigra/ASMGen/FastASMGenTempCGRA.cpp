@@ -1005,7 +1005,13 @@ struct FastASMGenTemporalCGRAPass
     // organize the rawSolution to a final solution
     DenseMap<Operation *, int> blasLatency;
     for (auto blasOp : funcOp.getOps<cgra::BlasGemmAsmOp>()) {
-      int latencyCC = 27;
+      int latencyCC = -1;
+      if (nRow == 4 && nCol == 4)
+        latencyCC = 27;
+      else if (nRow == 3 && nCol == 3)
+        latencyCC = 45;
+      else
+        return signalPassFailure();
       if (blasOp->getAttr("mulASM"))
         latencyCC++;
       if (blasOp->getAttr("addASM"))
@@ -1023,7 +1029,7 @@ struct FastASMGenTemporalCGRAPass
         region, rawSolution, "space_temporal_assignment.csv", blasLatency);
 
     asmGen.setSolution(rawSolution);
-    asmGen.setRFAccessModel(RFAccessModel::RF_READ);
+    // asmGen.setRFAccessModel(RFAccessModel::RF_READ);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();

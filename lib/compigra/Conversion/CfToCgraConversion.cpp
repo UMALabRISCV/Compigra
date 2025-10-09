@@ -352,60 +352,6 @@ struct ArithCmpIOpConversion : OpConversionPattern<arith::CmpIOp> {
   }
 };
 
-// template <typename MemRefOp>
-// Operation *computeOffSet(MemRefOp memOp, Operation *baseAddr,
-//                          SmallVector<Operation *> strideVals,
-//                          ConversionPatternRewriter &rewriter) {
-//   Operation *offSet = nullptr;
-
-//   for (auto [dim, indice] : llvm::enumerate(memOp.getIndices())) {
-//     // if indice is a constant 0, skip
-//     if (auto constantOp =
-//             dyn_cast_or_null<arith::ConstantIndexOp>(indice.getDefiningOp()))
-//             {
-//       if (constantOp.value() == 0) {
-//         continue;
-//       }
-//     }
-
-//     auto castOp = rewriter.create<arith::IndexCastOp>(
-//         memOp.getLoc(), rewriter.getIntegerType(32), indice);
-//     if (dim == memOp.getIndices().size() - 1) {
-//       if (offSet)
-//         offSet = rewriter.create<arith::AddIOp>(
-//             memOp.getLoc(), rewriter.getI32Type(), offSet->getResult(0),
-//             castOp.getResult());
-//       else
-//         offSet = castOp;
-//       break;
-//     }
-
-//     // Compute cumulative stride: product of all dimensions after current dim
-//     Operation *cumulativeStride = nullptr;
-//     for (size_t i = dim; i < strideVals.size(); ++i) {
-//       if (cumulativeStride) {
-//         cumulativeStride = rewriter.create<arith::MulIOp>(
-//             memOp.getLoc(), rewriter.getI32Type(),
-//             cumulativeStride->getResult(0), strideVals[i]->getResult(0));
-//       } else {
-//         cumulativeStride = strideVals[i];
-//       }
-//     }
-//     Value stride = strideVals[dim]->getResult(0);
-//     auto dimStride = rewriter.create<arith::MulIOp>(
-//         memOp.getLoc(), rewriter.getI32Type(), castOp.getResult(),
-//         cumulativeStride->getResult(0));
-//     if (offSet)
-//       offSet = rewriter.create<arith::AddIOp>(
-//           memOp.getLoc(), rewriter.getI32Type(), offSet->getResult(0),
-//           dimStride->getResult(0));
-//     else
-//       offSet = dimStride;
-//   }
-
-//   return offSet;
-// }
-
 template <typename MemRefOp>
 Operation *computeOffSet(MemRefOp memOp, Operation *baseAddr,
                          SmallVector<Operation *> strideVals,
@@ -758,69 +704,58 @@ Value computeSubviewOffset(OpBuilder &builder, Location loc,
 
   // Get the offsets from the subview operation
   SmallVector<OpFoldResult> offsets = subviewOp.getMixedOffsets();
-  SmallVector<OpFoldResult> strides = subviewOp.getMixedStrides();
 
   builder.setInsertionPointAfter(subviewOp);
-  // Start with zero offset
-  Value totalOffset = builder.create<arith::ConstantOp>(
-      loc, builder.getIndexType(), builder.getIndexAttr(0));
 
-  // Compute the stride values for each dimension of the source memref
-  SmallVector<Value> sourceStrides;
-  Value currentStride = builder.create<arith::ConstantOp>(
-      loc, builder.getIndexType(), builder.getIndexAttr(1));
-
-  // Calculate strides from innermost to outermost dimension
-  for (int i = sourceShape.size() - 1; i >= 0; --i) {
-    sourceStrides.insert(sourceStrides.begin(), currentStride);
-
-    if (i > 0) { // Don't multiply for the outermost dimension
-      Value dimSize;
-      if (sourceShape[i] == ShapedType::kDynamic) {
-        dimSize = builder.create<memref::DimOp>(loc, sourceMemref, i);
-      } else {
-        dimSize = builder.create<arith::ConstantOp>(
-            loc, builder.getIndexType(), builder.getIndexAttr(sourceShape[i]));
-      }
-      currentStride =
-          builder.create<arith::MulIOp>(loc, currentStride, dimSize);
-    }
+  // Precompute strides for each dimension
+  SmallVector<int64_t> strides(sourceShape.size(), 1);
+  for (int i = sourceShape.size() - 2; i >= 0; --i) {
+    if (sourceShape[i + 1] == ShapedType::kDynamic || strides[i + 1] == 0)
+      return nullptr; // Can't precompute if dynamic
+    strides[i] = strides[i + 1] * sourceShape[i + 1];
   }
 
-  // For each dimension, add offset[i] * source_stride[i] to total offset
-  for (size_t i = 0; i < offsets.size(); ++i) {
-    Value offsetValue;
+  int64_t totalConstOffset = 0;
+  Value totalOffset = nullptr;
 
-    // Extract the offset value (could be static or dynamic)
+  for (size_t i = 0; i < offsets.size(); ++i) {
+    int64_t stride = strides[i];
     if (auto attr = offsets[i].dyn_cast<Attribute>()) {
       int64_t staticOffset = attr.cast<IntegerAttr>().getInt();
-      if (staticOffset != 0) {
-        offsetValue = builder.create<arith::ConstantOp>(
-            loc, builder.getIndexType(), builder.getIndexAttr(staticOffset));
-      } else {
-        continue; // Skip if offset is 0
-      }
+      if (staticOffset != 0)
+        totalConstOffset += staticOffset * stride;
     } else {
-      offsetValue = offsets[i].get<Value>();
-
-      // Check if the offset is zero (optimization)
+      Value offsetValue = offsets[i].get<Value>();
+      // Only generate IR if offset is not a constant zero
       if (auto constOp = offsetValue.getDefiningOp<arith::ConstantOp>()) {
         if (auto intAttr = constOp.getValue().dyn_cast<IntegerAttr>()) {
-          if (intAttr.getInt() == 0) {
-            continue; // Skip if offset is 0
-          }
+          if (intAttr.getInt() == 0)
+            continue;
         }
       }
+      Value strideVal = builder.create<arith::ConstantOp>(
+          loc, builder.getIndexType(), builder.getIndexAttr(stride));
+      Value contribution =
+          builder.create<arith::MulIOp>(loc, offsetValue, strideVal);
+      if (totalOffset)
+        totalOffset =
+            builder.create<arith::AddIOp>(loc, totalOffset, contribution);
+      else
+        totalOffset = contribution;
     }
-
-    // Multiply offset by corresponding stride
-    Value contribution =
-        builder.create<arith::MulIOp>(loc, offsetValue, sourceStrides[i]);
-
-    // Add to total offset
-    totalOffset = builder.create<arith::AddIOp>(loc, totalOffset, contribution);
   }
 
+  // If all offsets are constant, just return a constant
+  if (!totalOffset) {
+    return builder.create<arith::ConstantOp>(
+        loc, builder.getIndexType(), builder.getIndexAttr(totalConstOffset));
+  }
+  // If there is a constant offset, add it
+  if (totalConstOffset != 0) {
+    Value constOffset = builder.create<arith::ConstantOp>(
+        loc, builder.getIndexType(), builder.getIndexAttr(totalConstOffset));
+    totalOffset = builder.create<arith::AddIOp>(loc, totalOffset, constOffset);
+  }
   return totalOffset;
 }
 

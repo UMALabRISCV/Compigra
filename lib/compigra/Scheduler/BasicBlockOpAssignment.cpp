@@ -1060,7 +1060,7 @@ void BasicBlockOpAssignment::updateEmbeddingGraph(
       }
       // check whether the value should be kept anymore
       auto val = it->val;
-      if (!isLive(val, curBlock, liveout, scheduledOps)) {
+      if (!isLive(val, curBlock, liveout, totalScheduledOp)) {
         it = curGraph.erase(it);
       } else {
         ++it;
@@ -1111,16 +1111,19 @@ static std::map<int, PERegUse> getAvailableResourceGraph(
       continue;
 
     // if regAttr is IN, remove the resource from the freeReg
+    SetVector<Operation *> totalScheduledOp = scheduledOps;
+    totalScheduledOp.insert(layerScheduledOps.begin(), layerScheduledOps.end());
+    bool avail = isLiveExcept(place.val, scheduleOp->getBlock(), scheduleOp,
+                              liveout, totalScheduledOp);
     if (reg == RegAttr::IN || reg == RegAttr::IE)
-      freeReg[pe].inNum--;
+      if (!avail)
+        freeReg[pe].inNum--;
     // if regAttr is EX, remove the resource from the freeReg
     if (reg == RegAttr::EX) {
-      SetVector<Operation *> totalScheduledOp = scheduledOps;
-      totalScheduledOp.insert(layerScheduledOps.begin(),
-                              layerScheduledOps.end());
-      freeReg[pe].exAvail &=
-          !isLiveExcept(place.val, scheduleOp->getBlock(), scheduleOp, liveout,
-                        totalScheduledOp);
+      // schedule op does not affect current Rout
+      if (scheduleOp->getNumResults() == 0)
+        continue;
+      freeReg[pe].exAvail &= avail;
     }
   }
   return freeReg;
@@ -1520,11 +1523,8 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
   for (int i = 0; i < nRow * nCol; i++) {
     if (!regUse[i].exAvail)
       continue;
+
     availablePEs.insert(i);
-    // if (isRouteOp(scheduleOp) && !liveout.count(scheduleOp->getResult(0))) {
-    //   placementSpace.push_back({i, RegAttr::EX});
-    //   continue;
-    // }
     if (regUse[i].inNum > 0)
       placementSpace.push_back({i, RegAttr::IE});
     if (regUse[i].inNum == 0)
@@ -1661,39 +1661,6 @@ std::vector<placeunit> BasicBlockOpAssignment::searchOpPlacementSpace(
                        return availablePEs.count(p.first) == 0;
                      }),
       placementSpace.end());
-
-  // if the operation is used and only used by a conditional branch, it is
-  // bool usedForCond =
-  //     scheduleOp->hasOneUse() &&
-  //     scheduleOp->getUses().begin()->getOperandNumber() < 2 &&
-  //     isa<cgra::ConditionalBranchOp>(*(scheduleOp->getUsers().begin()));
-  // if (usedForCond) {
-  //   auto useNum = scheduleOp->getUses().begin()->getOperandNumber();
-  //   auto user = *(scheduleOp->getUsers().begin());
-  //   bool condCst =
-  //       isa<arith::AddIOp>(scheduleOp) &&
-  //       scheduleOp->getOperand(0).getDefiningOp() &&
-  //       isa<arith::ConstantOp>(scheduleOp->getOperand(0).getDefiningOp()) &&
-  //       scheduleOp->getOperand(1).getDefiningOp() &&
-  //       isa<arith::ConstantOp>(scheduleOp->getOperand(1).getDefiningOp());
-  //   // get the other operand of the user
-  //   auto opr1 = user->getOperand(useNum == 0 ? 1 : 0);
-  //   // if find opr1 in the curGraph, get its placement
-  //   auto opr1Place = getSrcValuePlacement(opr1, curGraph);
-  //   auto it = std::find_if(placementSpace.begin(), placementSpace.end(),
-  //                          [&](const std::pair<unsigned, RegAttr> &p) {
-  //                            return p.first == opr1Place.pe;
-  //                          });
-  //   if (opr1Place.val != nullptr && it != placementSpace.end()) {
-  //     //  only keep it in placementSpace
-  //     placementSpace.erase(
-  //         std::remove_if(placementSpace.begin(), placementSpace.end(),
-  //                        [&](const std::pair<unsigned, RegAttr> &p) {
-  //                          return p.first != opr1Place.pe;
-  //                        }),
-  //         placementSpace.end());
-  //   }
-  // }
 
   return placementSpace;
 }

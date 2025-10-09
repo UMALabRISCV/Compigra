@@ -3,6 +3,7 @@ add_compigra_library(MLIRCompigraSupport
   OpenEdgeASM.cpp
   InterferenceGraphCreation.cpp
   PolyhedraScheduler.cpp
+  mmul_blas_asm_config.cpp
 
   LINK_LIBS PUBLIC
   MLIRIR

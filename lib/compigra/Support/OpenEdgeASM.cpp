@@ -11,11 +11,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "compigra/Support/OpenEdgeASM.h"
-#include "compigra/ASMGen/mmul_blas_asm.h"
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
 #include "compigra/Scheduler/KernelSchedule.h"
 #include "compigra/Scheduler/ModuloScheduleAdapter.h"
+#include "compigra/Support/mmul_blas_asm_config.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -288,8 +288,10 @@ void getLimitationUseWithPhiNode(
                                       usedColors, maxReg);
     // limit the coloring selection of the phi node
     // rewrite all value in limitedUse
-    for (auto v : defNodes)
+    for (auto v : defNodes) {
       graph.colorMap[v] = color;
+      llvm::errs() << v << ": LIMIT TO R" << std::to_string(color) << "\n";
+    }
 
     graph.colorMap[node] = color;
   }
@@ -625,17 +627,16 @@ LogicalResult OpenEdgeASMGen::allocateRegisterRoutAccess() {
             solution[op].reg = std::stoi(regStr.substr(1));
             break;
           }
-          // If the correspond PE is set, stop seeking from its other
-          // users
         }
 
         // if the user PE is not restricted, don't allocate register for now
       }
 
       // bool internalBBU
-      if (allUserOutside || placeExternal) {
-        solution[op].reg = maxReg;
-      }
+      if (op->getNumResults() > 0 && !isPhiRelatedValue(op->getResult(0)))
+        if (allUserOutside || placeExternal) {
+          solution[op].reg = maxReg;
+        }
     }
     // allocate register for the operations in the PE
     if (failed(allocateOutRegInPE(ops, solution, maxReg, pcCtrlFlow))) {
@@ -1042,7 +1043,13 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
       continue;
 
     if (ops.count(0) && isa<cgra::BlasGemmAsmOp>(ops.at(0))) {
-      ASMGenBLAS asmSchedule(t);
+      ASMGenConfig config;
+      if (nRow == 3 && nCol == 3) {
+        config = getConfigForSize3();
+      } else if (nRow == 4 && nCol == 4) {
+        config = getConfigForSize4();
+      }
+      ASMGenBLAS asmSchedule(t, config);
       auto asmMul =
           ops.at(0)->getAttr("mulASM")
               ? ops.at(0)->getAttr("mulASM").cast<StringAttr>().getValue()
