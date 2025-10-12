@@ -76,6 +76,13 @@ static LogicalResult preScheduleUsingModuloScheduler(
                            basicBlocksWithOpIds, instructions)))
       continue;
 
+    // print instructions
+    for (auto [id, inst] : instructions) {
+      llvm::errs() << "Id: " << id << ", Name: " << inst.name
+                   << ", Time: " << inst.time << ", PE: " << inst.pe
+                   << ", Rout: " << inst.Rout << ", OpA: " << inst.opA
+                   << ", OpB: " << inst.opB << "\n";
+    }
     std::map<int, int> execTime = getLoopOpUnfoldExeTime(opTimeMap);
     if (!memoryConsistencySchedule(execTime, II, &blk) ||
         !kernelOverlap(basicBlocksWithOpIds))

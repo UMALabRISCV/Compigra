@@ -288,10 +288,8 @@ void getLimitationUseWithPhiNode(
                                       usedColors, maxReg);
     // limit the coloring selection of the phi node
     // rewrite all value in limitedUse
-    for (auto v : defNodes) {
+    for (auto v : defNodes)
       graph.colorMap[v] = color;
-      llvm::errs() << v << ": LIMIT TO R" << std::to_string(color) << "\n";
-    }
 
     graph.colorMap[node] = color;
   }
@@ -955,9 +953,8 @@ std::string OpenEdgeASMGen::printInstructionToISA(Operation *op,
     } else {
       int predicatePE = instSolution[cntOp].pe;
       addition =
-          getOperandSrcReg(instSolution[op].pe, instSolution[cntOp].pe,
-                           instSolution[cntOp].Rout, nRow, nCol, maxReg) +
-          ",";
+          "," + getOperandSrcReg(instSolution[op].pe, instSolution[cntOp].pe,
+                                 instSolution[cntOp].Rout, nRow, nCol, maxReg);
     }
   }
 
@@ -1048,6 +1045,8 @@ void OpenEdgeASMGen::printKnownSchedule(bool GridLIke, int startPC,
         config = getConfigForSize3();
       } else if (nRow == 4 && nCol == 4) {
         config = getConfigForSize4();
+      } else if (nRow == 5 && nCol == 5) {
+        config = getConfigForSize5();
       }
       ASMGenBLAS asmSchedule(t, config);
       auto asmMul =

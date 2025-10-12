@@ -767,6 +767,7 @@ static LogicalResult preScheduleWithExternalSupport(
     std::map<int, std::set<int>> opTimeMap;
     std::vector<std::set<int>> basicBlocksWithOpIds = {};
     if (failed(readMapFile(outputDAG, "bb" + std::to_string(bbInd), maxReg,
+    if (failed(readMapFile(outputDAG, "bb" + std::to_string(bbInd), maxReg,
                            opSize + blk.getNumArguments() - 1, II, opTimeMap,
                            basicBlocksWithOpIds, instructions)))
       continue;

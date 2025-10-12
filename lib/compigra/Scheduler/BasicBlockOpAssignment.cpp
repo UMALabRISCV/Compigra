@@ -2190,11 +2190,10 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
       }
       // otherwise, route the operation itself
       if (routable == 1) {
-        logMessage("Route to consumer\n", false, DebugMode);
-        if (DebugMode)
-          rso << "Warning: Route liveout: " << *op;
-        logMessage(rso.str(), false, DebugMode);
         if (op->getNumResults() > 0 && liveout.count(op->getResult(0)) > 0) {
+          if (DebugMode)
+            rso << "Warning: Route liveout: " << *op;
+          logMessage(rso.str(), false, DebugMode);
           auto newLiveOut = createAtomicMovOp(op->getResult(0), false, false);
           // replace the use if it is used outside the block
           op->getResult(0).replaceUsesWithIf(

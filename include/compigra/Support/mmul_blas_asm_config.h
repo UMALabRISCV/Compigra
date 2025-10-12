@@ -33,6 +33,10 @@ inline ASMGenConfig getConfigForSize4() {
   return {4, 11, 17, 16, 23, 26, 9, 4, 3, true};
 }
 
+inline ASMGenConfig getConfigForSize5() {
+  return {5, 18, 25, 24, 32, 35, 11, 5, 3, false};
+}
+
 struct ASMGenBLAS {
   int initPC = 0;
   ASMGenConfig config;
@@ -99,16 +103,7 @@ struct ASMGenBLAS {
     int ctrl1Row2 = config.ctrl1Row2 + numInserted;
 
     // Apply control signals
-    if (config.cgraSize == 3) {
-      table[config.ctrl0Row][config.ctrl0Col] = ctrl0;
-
-      if (ctrl1Row1 < table.size()) {
-        table[ctrl1Row1][config.ctrl1Col1] = ctrl0;
-      }
-      if (ctrl1Row2 < table.size()) {
-        table[ctrl1Row2][config.ctrl1Col2] = ctrl0;
-      }
-    } else if (config.cgraSize == 4) {
+    if (config.cgraSize == 4) {
       if (config.ctrl0Row < table.size()) {
         table[config.ctrl0Row][config.ctrl0Col] = ctrl0;
       }
@@ -117,6 +112,15 @@ struct ASMGenBLAS {
       }
       if (ctrl1Row2 < table.size()) {
         table[ctrl1Row2][config.ctrl1Col2] = ctrl1;
+      }
+    } else if (config.cgraSize == 3 || config.cgraSize == 5) {
+      table[config.ctrl0Row][config.ctrl0Col] = ctrl0;
+
+      if (ctrl1Row1 < table.size()) {
+        table[ctrl1Row1][config.ctrl1Col1] = ctrl0;
+      }
+      if (ctrl1Row2 < table.size()) {
+        table[ctrl1Row2][config.ctrl1Col2] = ctrl0;
       }
     }
 
