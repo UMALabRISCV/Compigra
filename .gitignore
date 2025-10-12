@@ -4,3 +4,4 @@ build/*
 *.mlir
 *.sat
 */satmapit/*
+benchmarks/*
