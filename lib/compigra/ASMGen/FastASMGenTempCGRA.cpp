@@ -478,7 +478,7 @@ double computeInitialPlacementCost(std::map<int, compigra::placeunit> result,
                                    GridAttribute grid) {
   double cost = 0.0;
   // count the register use
-  std::vector<int> regUseCount = std::vector<int>(16, 0);
+  std::vector<int> regUseCount = std::vector<int>(grid.nRow * grid.nCol, 0);
   int maxReg = 0;
   for (auto &[index, place] : result) {
     if (place.second == RegAttr::EX)
@@ -564,22 +564,6 @@ double computeInitialPlacementCost(std::map<int, compigra::placeunit> result,
   }
   affinityCost = affinityCost == 0.0 ? 0.0 : affinityCost / costsCount;
 
-  // std::string message;
-  // llvm::raw_string_ostream rso(message);
-  // rso << "Nodes:\n";
-  // for (auto &[index, vals] : nodes) {
-  //   rso << "index: " << index << "\n";
-  //   for (auto val : vals) {
-  //     rso << "  " << val << "\n";
-  //   }
-  //   rso << "Placement: " << result[index].first
-  //       << " reg attr: " << result[index].second << "\n";
-  //   rso << "\n";
-  // }
-  // rso << "Cost: " << stdDev << " " << affinityCost << " = "
-  //     << (stdDev + affinityCost) << "\n";
-  // logMessage(rso.str());
-
   cost = stdDev + affinityCost;
   return cost;
 }
@@ -615,7 +599,7 @@ void optimizeAcrossBBValuePlacement(
     nodes[nodes.size()] = relatedVals;
   }
 
-  GridAttribute gridAttr = GridAttribute{nRow, nCol, 4};
+  GridAttribute gridAttr = GridAttribute{nRow, nCol, nRow * nCol};
   std::map<int, compigra::placeunit> optimal;
   double minCost = 1e3;
   for (auto iter = 0; iter < 10; iter++) {
@@ -766,7 +750,6 @@ static LogicalResult preScheduleWithExternalSupport(
     std::map<int, Instruction> instructions;
     std::map<int, std::set<int>> opTimeMap;
     std::vector<std::set<int>> basicBlocksWithOpIds = {};
-    if (failed(readMapFile(outputDAG, "bb" + std::to_string(bbInd), maxReg,
     if (failed(readMapFile(outputDAG, "bb" + std::to_string(bbInd), maxReg,
                            opSize + blk.getNumArguments() - 1, II, opTimeMap,
                            basicBlocksWithOpIds, instructions)))
@@ -1011,6 +994,8 @@ struct FastASMGenTemporalCGRAPass
         latencyCC = 27;
       else if (nRow == 3 && nCol == 3)
         latencyCC = 45;
+      else if (nRow == 5 && nCol == 5)
+        latencyCC = 36;
       else
         return signalPassFailure();
       if (blasOp->getAttr("mulASM"))
