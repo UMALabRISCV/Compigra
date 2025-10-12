@@ -806,8 +806,17 @@ LogicalResult OpenEdgeASMGen::convertToInstructionMap(bool rfAccess) {
                          "Unknown",
                          "Unknown"};
     int leftId = 0;
-    if (isa<cgra::BzfaOp, cgra::BsfaOp>(op))
+    if (isa<cgra::BzfaOp, cgra::BsfaOp>(op)) {
       leftId = 1;
+      auto producer = getCntDefOpIndirectly(op->getOperand(0))[0];
+      inst.predicate =
+          getOperandSrcReg(unit.pe, solution[producer].pe,
+                           solution[producer].reg, nRow, nCol, maxReg);
+      if (rfAccess && inst.predicate.substr(0, 2) == "RC") {
+        inst.predicate = "R" + std::to_string(solution[producer].reg) +
+                         inst.predicate.substr(2);
+      }
+    }
 
     // Get defition operation
     if (op->getNumOperands() > leftId && inst.opA == "Unknown") {
@@ -946,16 +955,7 @@ std::string OpenEdgeASMGen::printInstructionToISA(Operation *op,
   }
 
   if (isa<cgra::BzfaOp, cgra::BsfaOp>(op)) {
-    auto cntOp = getCntDefOpIndirectly(op->getOperand(0))[0];
-    if (auto constOp = dyn_cast<LLVM::ConstantOp>(cntOp)) {
-      int imm = constOp.getValueAttr().dyn_cast<IntegerAttr>().getInt();
-      addition = imm ? " " + std::to_string(imm) : " ZERO";
-    } else {
-      int predicatePE = instSolution[cntOp].pe;
-      addition =
-          "," + getOperandSrcReg(instSolution[op].pe, instSolution[cntOp].pe,
-                                 instSolution[cntOp].Rout, nRow, nCol, maxReg);
-    }
+    addition = "," + instSolution[op].predicate;
   }
 
   if (isa<cgra::LwdOp>(op)) {

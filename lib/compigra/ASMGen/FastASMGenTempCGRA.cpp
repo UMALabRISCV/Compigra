@@ -1015,7 +1015,7 @@ struct FastASMGenTemporalCGRAPass
         region, rawSolution, "space_temporal_assignment.csv", blasLatency);
 
     asmGen.setSolution(rawSolution);
-    // asmGen.setRFAccessModel(RFAccessModel::RF_READ);
+    asmGen.setRFAccessModel(RFAccessModel::RF_READ);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();

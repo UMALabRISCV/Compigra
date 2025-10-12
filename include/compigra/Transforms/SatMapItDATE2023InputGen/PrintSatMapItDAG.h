@@ -28,6 +28,7 @@ struct Instruction {
   int Rout = -1;
   std::string opA = "Unknown";
   std::string opB = "Unknown";
+  std::string predicate = "";
   // int immediate;
 };
 
