@@ -500,24 +500,19 @@ void ModuloScheduleAdapter::removeBlockArgs(Operation *term,
         term->getLoc(), condBr.getPredicate(), condBr.getOperand(0),
         condBr.getOperand(1), condBr.getTrueDest(), trueOperands,
         condBr.getFalseDest(), falseOperands);
-    llvm::errs() << "AFTER ARGUMENT REMOVE " << *newTerm << "\n";
+    // replace termOp with newTerm if it appears in the element of prologOps
+    for (auto &iterOps : prologOps)
+      for (auto &opPair : iterOps.second)
+        if (opPair.second == term) {
+          opPair.second = newTerm;
+        }
     term->erase();
     return;
   }
 }
 
 void ModuloScheduleAdapter::removeUselessBlockArg() {
-  // First pass: collect all transformations needed
-  struct BlockArgRemoval {
-    Block *block;
-    Operation *prevTerm;
-    std::vector<Value> replacementValues;
-    std::vector<unsigned> argId;
-    unsigned oprIndBase;
-  };
-
-  std::vector<BlockArgRemoval> removals;
-
+  std::map<Block *, llvm::BitVector> blockArgUsage;
   for (auto &block : region) {
     if (block.isEntryBlock())
       continue;
@@ -526,93 +521,36 @@ void ModuloScheduleAdapter::removeUselessBlockArg() {
                       block.getPredecessors().end()) > 1)
       continue;
 
+    // the block has only one predecessor and have arguments
+    // get the corresponding value in the predecessor
     auto prevTerm = (*block.getPredecessors().begin())->getTerminator();
-    unsigned oprIndBase = 0;
+    auto oprIndBase = 0;
     if (auto condBr = dyn_cast<cgra::ConditionalBranchOp>(prevTerm)) {
+      // the block is the false dest
       oprIndBase = 2;
       if (condBr.getFalseDest() == &block)
         oprIndBase += condBr.getTrueDestOperands().size();
     }
 
-    // Collect replacement values and arg indices
-    std::vector<Value> replacementValues;
+    // find the corresponding value in the predecessor
     std::vector<unsigned> argId;
     unsigned oprInd = 0;
-    for (auto arg : block.getArguments()) {
-      replacementValues.push_back(prevTerm->getOperand(oprIndBase + oprInd));
+    for (auto arg : llvm::make_early_inc_range(block.getArguments())) {
+      arg.replaceAllUsesWith(prevTerm->getOperand(oprIndBase + oprInd));
       argId.push_back(oprInd);
       oprInd++;
     }
+    // remove all block arguments
+    removeBlockArgs(prevTerm, argId, &block);
 
-    removals.push_back(BlockArgRemoval{&block, prevTerm,
-                                       std::move(replacementValues),
-                                       std::move(argId), oprIndBase});
+    llvm::BitVector bitVec(argId.size(), true);
+    blockArgUsage[&block] = bitVec;
   }
-
-  // Second pass: apply all transformations
-  std::map<Block *, llvm::BitVector> blockArgUsage;
-
-  for (auto &removal : removals) {
-    // Replace uses BEFORE modifying terminator
-    unsigned oprInd = 0;
-    for (auto arg : removal.block->getArguments()) {
-      arg.replaceAllUsesWith(removal.replacementValues[oprInd]);
-      oprInd++;
-    }
-
-    // Now remove the block args from predecessor terminator
-    removeBlockArgs(removal.prevTerm, removal.argId, removal.block);
-
-    llvm::BitVector bitVec(removal.argId.size(), true);
-    blockArgUsage[removal.block] = bitVec;
-  }
-
-  // Third pass: erase the arguments
+  // remove all useless block arguments
   for (auto [blk, bitVec] : blockArgUsage) {
     blk->eraseArguments(bitVec);
   }
 }
-
-// void ModuloScheduleAdapter::removeUselessBlockArg() {
-//   std::map<Block *, llvm::BitVector> blockArgUsage;
-//   for (auto &block : region) {
-//     if (block.isEntryBlock())
-//       continue;
-//     if (block.getArguments().size() == 0 ||
-//         std::distance(block.getPredecessors().begin(),
-//                       block.getPredecessors().end()) > 1)
-//       continue;
-
-//     // the block has only one predecessor and have arguments
-//     // get the corresponding value in the predecessor
-//     auto prevTerm = (*block.getPredecessors().begin())->getTerminator();
-//     auto oprIndBase = 0;
-//     if (auto condBr = dyn_cast<cgra::ConditionalBranchOp>(prevTerm)) {
-//       // the block is the false dest
-//       oprIndBase = 2;
-//       if (condBr.getFalseDest() == &block)
-//         oprIndBase += condBr.getTrueDestOperands().size();
-//     }
-
-//     // find the corresponding value in the predecessor
-//     std::vector<unsigned> argId;
-//     unsigned oprInd = 0;
-//     for (auto arg : llvm::make_early_inc_range(block.getArguments())) {
-//       arg.replaceAllUsesWith(prevTerm->getOperand(oprIndBase + oprInd));
-//       argId.push_back(oprInd);
-//       oprInd++;
-//     }
-//     // remove all block arguments
-//     removeBlockArgs(prevTerm, argId, &block);
-
-//     llvm::BitVector bitVec(argId.size(), true);
-//     blockArgUsage[&block] = bitVec;
-//   }
-//   // remove all useless block arguments
-//   for (auto [blk, bitVec] : blockArgUsage) {
-//     blk->eraseArguments(bitVec);
-//   }
-// }
 
 static int existBlockArgument(std::vector<int> argIds, int id) {
   for (auto [blkArg, opId] : llvm::enumerate(argIds)) {

@@ -965,7 +965,6 @@ void CgraFitToOpenEdgePass::runOnOperation() {
   }
 
   raiseCstOpGenOutLoop(funcOp);
-  llvm::errs() << funcOp << "\n";
   // print the DAG of the specified function
   if (!outputDAG.empty()) {
     size_t lastSlashPos = outputDAG.find_last_of("/");
