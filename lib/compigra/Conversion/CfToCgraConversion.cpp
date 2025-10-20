@@ -617,7 +617,7 @@ allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
   constAddr[-1] = offset;
 
   // assign memory for alloc operations
-  unsigned baseAddr = 0x1C800;
+  unsigned baseAddr = 0x10158;
   for (auto [ind, op] : llvm::enumerate(funcOp.getOps<memref::AllocOp>())) {
     auto baseOp = builder.create<arith::ConstantIntOp>(
         funcOp.getLoc(), baseAddr, builder.getI32Type());
