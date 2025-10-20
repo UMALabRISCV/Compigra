@@ -338,17 +338,6 @@ void updateGlobalValPlacement(
   removeDeadValue(initGraph, liveIns[updateBlk]);
   removeDeadValue(finiGraph, liveOuts[updateBlk]);
 
-  llvm::errs() << "InitGraph: \n";
-  for (auto val : initGraph) {
-    llvm::errs() << val.val << " " << val.pe << " "
-                 << static_cast<int>(val.regAttr) << "\n";
-  }
-  llvm::errs() << "FiniGraph: \n";
-  for (auto val : finiGraph) {
-    llvm::errs() << val.val << " " << val.pe << " "
-                 << static_cast<int>(val.regAttr) << "\n";
-  }
-
   // update the global value placement with the updated initGraph
   for (auto &valPlace : initGraph) {
     auto val = valPlace.val;
@@ -755,14 +744,6 @@ static LogicalResult preScheduleWithExternalSupport(
                            basicBlocksWithOpIds, instructions)))
       continue;
 
-    // print instructions
-    for (auto [id, inst] : instructions) {
-      llvm::errs() << "Id: " << id << ", Name: " << inst.name
-                   << ", Time: " << inst.time << ", PE: " << inst.pe
-                   << ", Rout: " << inst.Rout << ", OpA: " << inst.opA
-                   << ", OpB: " << inst.opB << "\n";
-    }
-
     std::map<int, int> execTime = getLoopOpUnfoldExeTime(opTimeMap);
     if (!memoryConsistencySchedule(execTime, II, &blk) ||
         !kernelOverlap(basicBlocksWithOpIds))
@@ -865,7 +846,7 @@ struct FastASMGenTemporalCGRAPass
     }
 
     computeLiveValue(region, liveIns, liveOuts);
-    printBlockLiveValue(region, liveIns, liveOuts);
+    // printBlockLiveValue(region, liveIns, liveOuts);
 
     int bbId = 0;
 

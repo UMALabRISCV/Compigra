@@ -159,6 +159,7 @@ private:
   ///  -1: failed to create route path as routing does not solve the problem.
   int createRoutePath(Operation *failOp, std::vector<ValuePlacement> &producers,
                       std::vector<unsigned> &movs,
+                      const std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
                       std::vector<ValuePlacement> curGraph,
                       std::vector<ValuePlacement> finiGraph,
                       SmallVector<mlir::Operation *, 4> otherFailureOps = {},
@@ -206,6 +207,7 @@ private:
       std::map<Block *, SetVector<Value>> &liveIns,
       std::map<Block *, SetVector<Value>> &liveOuts,
       SmallVector<Operation *, 4> graphTransformedOps,
+      const std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
       std::vector<compigra::ValuePlacement> &curGraph,
       std::vector<compigra::ValuePlacement> &finiGraph);
 

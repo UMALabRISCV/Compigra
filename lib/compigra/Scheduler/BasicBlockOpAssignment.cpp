@@ -465,8 +465,8 @@ static std::map<Operation *, std::pair<int, int>> getSchedulePriority(
       break;
     }
     for (auto op : schedulingOps) {
-      if (prevPriority.count(op) == 0 && earliest < curDepth)
-        continue;
+      // if (prevPriority.count(op) == 0 && earliest < curDepth)
+      //   continue;
       if (prevPriority.count(op) && earliest < prevPriority[op].first)
         continue;
 
@@ -530,6 +530,39 @@ static std::map<Operation *, std::pair<int, int>> getSchedulePriority(
   return schedulePriority;
 }
 
+static bool usedByBranchForNextCC(Operation *user, unsigned operandNum) {
+  return isa<cf::BranchOp>(user) ||
+         (isa<cgra::ConditionalBranchOp>(user) && operandNum > 1);
+}
+
+static bool readyToSchedule(Operation *op, Block *blk,
+                            SetVector<Operation *> scheduledOps) {
+  for (auto &opr : op->getOpOperands()) {
+    if (usedByBranchForNextCC(op, opr.getOperandNumber()))
+      continue;
+    auto operand = opr.get();
+
+    if (auto arg = dyn_cast_or_null<BlockArgument>(operand))
+      continue;
+
+    auto defOp = operand.getDefiningOp();
+    // check whether the operand is a liveIn value or belongs to the
+    // scheduled operations
+    bool isConstant = isa<arith::ConstantOp>(defOp);
+    if (isConstant)
+      continue;
+
+    // if the operand is from other block, it is considered as liveIn
+    if (defOp->getBlock() != blk)
+      continue;
+
+    // check whether defOp is scheduled
+    if (!scheduledOps.contains(defOp))
+      return false;
+  }
+  return true;
+}
+
 static SmallVector<Operation *, 4> getScheduleOps(
     Block *block, int height,
     const std::map<Operation *, std::pair<int, int>> schedulePriority,
@@ -542,14 +575,20 @@ static SmallVector<Operation *, 4> getScheduleOps(
 
     // if the operation is in the scheduling height, add it to the scheduling
     // operations
+    bool selected = false;
     if (strategy == ScheduleStrategy::ASAP && priority.first <= height)
-      schedulingOps.push_back(op);
+      selected = true;
 
     if (strategy == ScheduleStrategy::ALAP && priority.second >= height)
-      schedulingOps.push_back(op);
+      selected = true;
 
     if (strategy == ScheduleStrategy::DYNAMIC && priority.first <= height &&
         priority.second >= height) {
+      selected = true;
+    }
+
+    if (selected && readyToSchedule(op, block, scheduledOps)) {
+      // check whether all its sources are scheduled
       schedulingOps.push_back(op);
     }
   }
@@ -814,7 +853,7 @@ static double getAccessCost(
 }
 
 static double getSuccessCost(
-    std::map<Operation *, ScheduleUnit> scheduleResult,
+    int height, std::map<Operation *, ScheduleUnit> scheduleResult,
     const std::map<Operation *, std::pair<int, int>> schedulePriority,
     SmallVector<mlir::Operation *, 4> totalOps) {
   double cost = 0;
@@ -1791,17 +1830,19 @@ int shuffleSearchSpace(
 }
 
 static void sortProducersByWeight(std::vector<ValuePlacement> &producers,
+                                  const std::vector<unsigned> &prodTime,
                                   const std::vector<unsigned> &weight) {
   std::vector<size_t> indices(producers.size());
-  // Initialize indices 0, 1, 2, ..., n-1
   for (size_t i = 0; i < indices.size(); ++i)
     indices[i] = i;
 
-  // Sort indices based on weight
-  std::sort(indices.begin(), indices.end(),
-            [&weight](size_t a, size_t b) { return weight[a] > weight[b]; });
+  // Sort indices: first by prodTime (ascending), then by weight (descending)
+  std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+    if (prodTime[a] != prodTime[b])
+      return prodTime[a] < prodTime[b];
+    return weight[a] > weight[b];
+  });
 
-  // Apply the sorted indices to reorder producers
   std::vector<ValuePlacement> sortedProducers;
   sortedProducers.reserve(producers.size());
   for (size_t i : indices)
@@ -1812,8 +1853,9 @@ static void sortProducersByWeight(std::vector<ValuePlacement> &producers,
 
 int BasicBlockOpAssignment::createRoutePath(
     Operation *failOp, std::vector<ValuePlacement> &producers,
-    std::vector<unsigned> &movs, std::vector<ValuePlacement> curGraph,
-    std::vector<ValuePlacement> finiGraph,
+    std::vector<unsigned> &movs,
+    const std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
+    std::vector<ValuePlacement> curGraph, std::vector<ValuePlacement> finiGraph,
     SmallVector<mlir::Operation *, 4> otherFailureOps, unsigned threshold) {
   // get all the producers of the failOp
   for (auto &opr : failOp->getOpOperands()) {
@@ -1836,17 +1878,21 @@ int BasicBlockOpAssignment::createRoutePath(
 
   // sort the producer with their usage by other failure operations
   std::vector<unsigned> weight(producers.size(), 0);
+  std::vector<unsigned> prodTime(producers.size(), 0);
   std::set<unsigned> prodPEs;
   blockedProdPEs.clear();
   for (auto [ind, prod] : llvm::enumerate(producers)) {
     auto val = prod.val;
     prodPEs.insert(prod.pe);
+    // get the produce time
+    if (solution.count(val.getDefiningOp()))
+      prodTime[ind] = solution.at(val.getDefiningOp()).time;
     for (auto user : val.getUsers())
       if (std::find(otherFailureOps.begin(), otherFailureOps.end(), user) !=
           otherFailureOps.end())
         weight[ind]++;
   }
-  sortProducersByWeight(producers, weight);
+  sortProducersByWeight(producers, prodTime, weight);
 
   // get the available PEs
   SetVector<unsigned> avaiPEs;
@@ -1913,18 +1959,6 @@ int BasicBlockOpAssignment::createRoutePath(
   for (size_t i = 1; i < producers.size(); ++i)
     intersection = getInterSection<unsigned>(intersection, popMap[i]);
   if (!intersection.empty()) {
-    // check whether movs[ind] are all 0, if yes, meaning that there are
-    // available spots to accomandate the consumers, but is less than the
-    // total number of placed operations. Let movs[0]++ for routing
-    // for (size_t i = 1; i < producers.size(); ++i) {
-    //   if (movs[i] > 0)
-    //     return true;
-    // }
-    // movs[0]++;
-
-    // If the producers need to be routed, we can return 0, otherwise, meaning
-    // that the failedOp can access its producers directly, it is restricted
-    // by its consumer access range.
     for (size_t i = 1; i < producers.size(); ++i) {
       if (movs[i] > 0)
         return 0;
@@ -2058,6 +2092,16 @@ void BasicBlockOpAssignment::updateSchedulePriority(
                               std::max(oldPriority.second, priority.second)};
     }
   }
+  if (DebugMode) {
+    std::string message;
+    llvm::raw_string_ostream rso(message);
+    rso << "Schedule Priority:\n";
+    for (auto [op, priority] : schedulePriority) {
+      rso << *op << " [" << priority.first << " " << priority.second << "]";
+      rso << "\n";
+    }
+    logMessage(rso.str(), false);
+  }
 }
 
 void BasicBlockOpAssignment::updateCDFG(Block *scheduleBB,
@@ -2102,8 +2146,8 @@ double BasicBlockOpAssignment::stepSA(
   replaceValMap.clear();
   int suc = placeOperations(height, schedulingOps, tmpScheduleResult, tmpGraph,
                             existSpace, finiGraph, shuffleOpIdx);
-  double sucCost =
-      getSuccessCost(tmpScheduleResult, schedulePriority, schedulingOps);
+  double sucCost = getSuccessCost(height, tmpScheduleResult, schedulePriority,
+                                  schedulingOps);
   double affinityCost = getSpatialAffinityTotalCost(
       curBlock, tmpScheduleResult, tmpGraph, finiGraph, schedulePriority, attr,
       liveOut, scheduledOps, height);
@@ -2132,6 +2176,7 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
     int &height, int &totalOpNum, std::map<Block *, SetVector<Value>> &liveIns,
     std::map<Block *, SetVector<Value>> &liveOuts,
     SmallVector<Operation *, 4> graphTransformedOps,
+    const std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
     std::vector<compigra::ValuePlacement> &curGraph,
     std::vector<compigra::ValuePlacement> &finiGraph) {
   bool transformed = false;
@@ -2143,8 +2188,8 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
     std::vector<ValuePlacement> producers;
     std::vector<unsigned> movs;
     // detect whether the operation is routable
-    int routable = createRoutePath(op, producers, movs, curGraph, finiGraph,
-                                   graphTransformedOps);
+    int routable = createRoutePath(op, producers, movs, solution, curGraph,
+                                   finiGraph, graphTransformedOps);
     logMessage("routable: " + std::to_string(routable) + "\n", false,
                DebugMode);
     if (routable >= 0) {
@@ -2324,14 +2369,16 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
   schedulePriority = getSchedulePriority(curBlock, livein, liveout);
 
   // print the schedule priority
-  std::string message;
-  llvm::raw_string_ostream rso(message);
-  rso << "Schedule Priority:\n";
-  for (auto [op, priority] : schedulePriority) {
-    rso << *op << " [" << priority.first << " " << priority.second << "]";
-    rso << "\n";
+  if (DebugMode) {
+    std::string message;
+    llvm::raw_string_ostream rso(message);
+    rso << "Schedule Priority:\n";
+    for (auto [op, priority] : schedulePriority) {
+      rso << *op << " [" << priority.first << " " << priority.second << "]";
+      rso << "\n";
+    }
+    logMessage(rso.str(), false, DebugMode);
   }
-  logMessage(rso.str(), false, DebugMode);
 
   int height = 1;
 
@@ -2412,11 +2459,12 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
       auto costAvg =
           std::accumulate(lastThreeCosts.begin(), lastThreeCosts.end(), 0.0) /
           lastThreeCosts.size();
-      double maxDiff = 0;
-      for (auto cost : lastThreeCosts) {
-        maxDiff = std::max(maxDiff, std::abs(cost - costAvg));
-      }
-      if (iter > 10 && std::abs(bestCost - costAvg) < 1e-3 && maxDiff > 1e-7) {
+      // double maxDiff = 0;
+      // for (auto cost : lastThreeCosts) {
+      //   maxDiff = std::max(maxDiff, std::abs(cost - costAvg));
+      // }
+      if (currentCost == 0 ||
+          (iter > 10 && std::abs(bestCost - costAvg) < 1e-3)) {
         break;
       }
 
@@ -2437,7 +2485,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     if (!graphTransformedOps.empty()) {
       if (failed(postSchedulingGraphTransformation(
               rollbackHeight, totalOpNum, liveIns, liveOuts,
-              graphTransformedOps, graphScheduleBefore, finiGraph)))
+              graphTransformedOps, solution, graphScheduleBefore, finiGraph)))
         return failure();
       // update schedule priority after graph transformation
       updateSchedulePriority(height, liveIns, liveOuts);
