@@ -644,9 +644,9 @@ allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
 
   std::vector<int> memAlloc;
   std::vector<std::vector<int>> memRefDims;
-  std::map<int, memref::GlobalOp> globalArgs;
+  std::map<int, memref::GetGlobalOp> globalArgs;
   // assign memory for global arguments
-  for (auto [ind, arg] : llvm::enumerate(funcOp.getOps<memref::GlobalOp>())) {
+  for (auto [ind, arg] : llvm::enumerate(funcOp.getOps<memref::GetGlobalOp>())) {
     globalArgs[ind] = arg;
     assignMemoryToArg(arg.getType(), lastPtr, memAlloc, memRefDims);
   }

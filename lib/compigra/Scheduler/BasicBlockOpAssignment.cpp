@@ -117,6 +117,64 @@ static void updateLiveOutBySuccessorLiveIn(Value val, Block *blk,
   liveOut.insert(val);
 }
 
+bool isCstZero(Operation *op) {
+  auto cstOp = dyn_cast_or_null<arith::ConstantOp>(op);
+  if (cstOp == nullptr)
+    return false;
+
+  auto attr = cstOp.getValue();
+  if ((attr.isa<mlir::IntegerAttr>() &&
+       attr.cast<mlir::IntegerAttr>().getValue().isZero()) ||
+      (attr.isa<mlir::FloatAttr>() &&
+       attr.cast<mlir::FloatAttr>().getValue().isZero()))
+    return true;
+  return false;
+}
+
+Value getRouteSrcOp(Operation *op) {
+  // op = add srcOp, zero, get SrcOp value until the value is not in
+  // spilledVals first check whether op match the pattern;
+
+  if (isa<arith::AddIOp>(op) || isa<arith::AddFOp>(op)) {
+    // the first operand is constant, return the op it self
+    if (op->getOperand(0).getDefiningOp() &&
+        isa<arith::ConstantOp>(op->getOperand(0).getDefiningOp()))
+      return op->getResult(0);
+    if (isCstZero(op->getOperand(1).getDefiningOp()))
+      return op->getOperand(0);
+  }
+
+  return op->getResult(0);
+}
+
+Value getRootValue(Value val) {
+  auto defOp = val.getDefiningOp();
+  if (!defOp)
+    return val;
+
+  auto srcVal = getRouteSrcOp(defOp);
+  if (srcVal == val)
+    return val;
+  // recursively get the root value
+  return getRootValue(srcVal);
+}
+
+static SmallVector<Operation *>
+getSpilledOps(Value val, SetVector<Value> spilledVals,
+              std::map<int, SmallVector<Operation *>> spillOps) {
+  SmallVector<Operation *> ops;
+  auto rootVal = getRootValue(val);
+  if (spilledVals.count(rootVal) > 0) {
+    // find corresponding route op in spillOps
+    auto index = std::distance(
+        spilledVals.begin(),
+        std::find_if(spilledVals.begin(), spilledVals.end(),
+                     [&](const Value &v) { return v == rootVal; }));
+    ops = spillOps[index];
+  }
+  return ops;
+}
+
 void computeLiveValue(Region &region,
                       std::map<Block *, SetVector<Value>> &liveIns,
                       std::map<Block *, SetVector<Value>> &liveOuts) {
@@ -457,7 +515,6 @@ static std::map<Operation *, std::pair<int, int>> getSchedulePriority(
 
     if (schedulingOps.empty()) {
       // print non scheduled ops
-      llvm::errs() << earliest << " Non scheduled ops: \n";
       for (auto &op : block->getOperations()) {
         if (!isa<arith::ConstantOp>(op) && visitedOps.count(&op) == 0)
           llvm::errs() << op << "\n";
@@ -465,8 +522,8 @@ static std::map<Operation *, std::pair<int, int>> getSchedulePriority(
       break;
     }
     for (auto op : schedulingOps) {
-      // if (prevPriority.count(op) == 0 && earliest < curDepth)
-      //   continue;
+      if (prevPriority.count(op) == 0 && earliest < curDepth)
+        continue;
       if (prevPriority.count(op) && earliest < prevPriority[op].first)
         continue;
 
@@ -869,20 +926,6 @@ static double getSuccessCost(
   }
   double failAll = cost == 0 ? 1e2 : 0;
   return normRatio == 0 ? failAll : failAll + (normRatio - cost) / normRatio;
-}
-
-bool isCstZero(Operation *op) {
-  auto cstOp = dyn_cast_or_null<arith::ConstantOp>(op);
-  if (cstOp == nullptr)
-    return false;
-
-  auto attr = cstOp.getValue();
-  if ((attr.isa<mlir::IntegerAttr>() &&
-       attr.cast<mlir::IntegerAttr>().getValue().isZero()) ||
-      (attr.isa<mlir::FloatAttr>() &&
-       attr.cast<mlir::FloatAttr>().getValue().isZero()))
-    return true;
-  return false;
 }
 
 SmallVector<Operation *, 4> getRouteOpStep1(Value val) {
@@ -1446,34 +1489,6 @@ ValuePlacement getSrcValuePlacement(Value src,
   return {nullptr, UINT_MAX, RegAttr::NK};
 }
 
-Value getRouteSrcOp(Operation *op) {
-  // op = add srcOp, zero, get SrcOp value until the value is not in
-  // spilledVals first check whether op match the pattern;
-
-  if (isa<arith::AddIOp>(op) || isa<arith::AddFOp>(op)) {
-    // the first operand is constant, return the op it self
-    if (op->getOperand(0).getDefiningOp() &&
-        isa<arith::ConstantOp>(op->getOperand(0).getDefiningOp()))
-      return op->getResult(0);
-    if (isCstZero(op->getOperand(1).getDefiningOp()))
-      return op->getOperand(0);
-  }
-
-  return op->getResult(0);
-}
-
-Value getRootValue(Value val) {
-  auto defOp = val.getDefiningOp();
-  if (!defOp)
-    return val;
-
-  auto srcVal = getRouteSrcOp(defOp);
-  if (srcVal == val)
-    return val;
-  // recursively get the root value
-  return getRootValue(srcVal);
-}
-
 void getOperandPlacement(Value opr, Operation *scheduleOp,
                          std::vector<compigra::ValuePlacement> &curGraph,
                          std::vector<Value> &routeVec,
@@ -1514,11 +1529,11 @@ void getOperandPlacement(Value opr, Operation *scheduleOp,
   auto rootVal = getRootValue(opr);
   if (spilledVals.count(rootVal) > 0) {
     // find corresponding route op in spillOps
-    auto index = std::distance(
-        spilledVals.begin(),
-        std::find_if(spilledVals.begin(), spilledVals.end(),
-                     [&](const Value &v) { return v == rootVal; }));
-    auto spillOpSet = spillOps[index];
+    // auto index = std::distance(
+    //     spilledVals.begin(),
+    //     std::find_if(spilledVals.begin(), spilledVals.end(),
+    //                  [&](const Value &v) { return v == rootVal; }));
+    auto spillOpSet = getSpilledOps(opr, spilledVals, spillOps);
     for (auto op : spillOpSet) {
       // seek op->getResult(0) in the current graph
       auto spillOpResult = op->getResult(0);
@@ -1857,10 +1872,8 @@ int BasicBlockOpAssignment::createRoutePath(
     const std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
     std::vector<ValuePlacement> curGraph, std::vector<ValuePlacement> finiGraph,
     SmallVector<mlir::Operation *, 4> otherFailureOps, unsigned threshold) {
-  // get all the producers of the failOp
   for (auto &opr : failOp->getOpOperands()) {
-    if (isa<cf::BranchOp>(failOp) ||
-        (isa<cgra::ConditionalBranchOp>(failOp) && opr.getOperandNumber() > 1))
+    if (usedByBranchForNextCC(failOp, opr.getOperandNumber()))
       continue;
     auto opValue = opr.get();
     auto prodPtr =
@@ -1946,12 +1959,6 @@ int BasicBlockOpAssignment::createRoutePath(
     if (regAttr == RegAttr::EX || regAttr == RegAttr::IE) {
       populateRoutingPEs(prod.pe, popMap[ind]);
     }
-    auto spilVal = prod.val;
-    if (std::find(spilledVals.begin(), spilledVals.end(), spilVal) !=
-        spilledVals.end()) {
-      populateRoutingPEs(prod.pe, popMap[ind]);
-      movs[ind] += 1;
-    }
   }
 
   //  check whether the intersection exists
@@ -1959,11 +1966,48 @@ int BasicBlockOpAssignment::createRoutePath(
   for (size_t i = 1; i < producers.size(); ++i)
     intersection = getInterSection<unsigned>(intersection, popMap[i]);
   if (!intersection.empty()) {
-    for (size_t i = 1; i < producers.size(); ++i) {
-      if (movs[i] > 0)
-        return 0;
-    }
+    // for (size_t i = 1; i < producers.size(); ++i) {
+    //   if (movs[i] > 0)
+    //     return 0;
+    // }
     return 1;
+  }
+
+  // replace values with its spilled versions if possible
+  for (auto i = 0; i < producers.size(); i++) {
+    auto prodPtr = &producers[i];
+    auto opValue = prodPtr->val;
+
+    auto spilOps = getSpilledOps(opValue, spilledVals, spillOps);
+    auto coProducerInd = i == 0 ? 1 : 0;
+    if (i >= producers.size())
+      break;
+    auto coProducerPE = producers[coProducerInd].pe;
+
+    auto optimalPlacement = *prodPtr;
+    int optimalDist =
+        getDistance(prodPtr->pe, coProducerPE, attr.nRow, attr.nCol);
+    for (auto spilOp : spilOps) {
+      llvm::errs() << "Check spill op: " << *spilOp << "\n";
+      auto val = spilOp->getResult(0);
+      auto spilPlace = getSrcValuePlacement(val, curGraph);
+      if (spilPlace.val == nullptr)
+        continue;
+
+      auto d1 = getDistance(spilPlace.pe, coProducerPE, attr.nRow, attr.nCol);
+      if (d1 < optimalDist ||
+          (d1 == optimalDist && spilPlace.regAttr > prodPtr->regAttr)) {
+        optimalPlacement = spilPlace;
+        optimalDist = d1;
+      }
+    }
+    if (optimalPlacement.val != prodPtr->val) {
+      llvm::errs() << "Replace " << *failOp << " operand " << prodPtr->val
+                   << " with spilled version " << optimalPlacement.val << "...";
+      failOp->replaceUsesOfWith(prodPtr->val, optimalPlacement.val);
+      producers[i] = optimalPlacement;
+      llvm::errs() << "Done\n";
+    }
   }
 
   int population = 0;
@@ -2135,6 +2179,13 @@ double getLocalPopCost(SmallVector<Operation *, 4> &schedulingOps,
   return localPopCost;
 }
 
+double
+getExperimentalCost(int height, Block *scheduleBB,
+                    std::vector<ValuePlacement> &tmpGraph,
+                    std::map<Operation *, ScheduleUnit> &tmpScheduleResult) {
+  return 0.0;
+}
+
 double BasicBlockOpAssignment::stepSA(
     int height, SmallVector<Operation *, 4> &schedulingOps,
     std::map<Operation *, ScheduleUnit> &tmpScheduleResult,
@@ -2219,9 +2270,6 @@ LogicalResult BasicBlockOpAssignment::postSchedulingGraphTransformation(
         auto newRouteOps = routeOperation(producers, movs, op);
         newRouteOpsNum = newRouteOps.size();
         transformed = true;
-        // if the op is already a route operation, but not scheduled, don't
-        // create new route ops
-        // updateSchedulePriority(height, liveIns, liveOuts);
         if (DebugMode)
           rso << "Warning: Route for: " << *op << "\n";
         for (size_t i = 0; i < producers.size(); ++i) {
@@ -2488,7 +2536,7 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
               graphTransformedOps, solution, graphScheduleBefore, finiGraph)))
         return failure();
       // update schedule priority after graph transformation
-      updateSchedulePriority(height, liveIns, liveOuts);
+      updateSchedulePriority(rollbackHeight, liveIns, liveOuts);
 
       if (rollbackHeight <= height) {
         // rollback solution and scheduledOps
@@ -2548,9 +2596,12 @@ LogicalResult BasicBlockOpAssignment::mappingBBdataflowToCGRA(
     for (auto op : schedulingOps) {
       // delay the scheduling
       schedulePriority[op].first += 1;
+      if (schedulePriority[op].second == height) {
+        schedulePriority[op].second += 1;
+      }
     }
-    updateSchedulePriority(height, liveIns, liveOuts);
     height++;
+    updateSchedulePriority(height, liveIns, liveOuts);
   }
 
   if (failed(finalizeEmbeddingGraphWithLiveOut(finiGraph, graphScheduleBefore)))
