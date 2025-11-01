@@ -143,9 +143,9 @@ private:
   Operation *createAtomicMovOp(Value val, bool replaceCurBlkUse,
                                bool customLoc);
 
-  void updateSchedulePriority(int timeSlot,
-                              std::map<Block *, SetVector<Value>> liveIns,
-                              std::map<Block *, SetVector<Value>> liveOuts);
+  // void updateSchedulePriority(int timeSlot,
+  //                             std::map<Block *, SetVector<Value>> liveIns,
+  //                             std::map<Block *, SetVector<Value>> liveOuts);
 
   void updateCDFG(Block *scheduleBB, std::vector<ValuePlacement> initGraph,
                   std::vector<ValuePlacement> finiGraph);
@@ -157,13 +157,14 @@ private:
   /// 1: route path is created from the failed operation itself for it to access
   /// its consumers. One step routing is employed.
   ///  -1: failed to create route path as routing does not solve the problem.
-  int createRoutePath(Operation *failOp, std::vector<ValuePlacement> &producers,
-                      std::vector<unsigned> &movs,
-                      const std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
-                      std::vector<ValuePlacement> curGraph,
-                      std::vector<ValuePlacement> finiGraph,
-                      SmallVector<mlir::Operation *, 4> otherFailureOps = {},
-                      unsigned threshold = 2);
+  int createRoutePath(
+      Operation *failOp, std::vector<ValuePlacement> &producers,
+      std::vector<unsigned> &movs, SetVector<unsigned int> &intersection,
+      const std::map<mlir::Operation *, compigra::ScheduleUnit> &solution,
+      std::vector<ValuePlacement> curGraph,
+      std::vector<ValuePlacement> finiGraph,
+      SmallVector<mlir::Operation *, 4> otherFailureOps = {},
+      unsigned threshold = 2, bool sortProducer = true);
 
   SmallVector<Operation *, 4>
   routeOperation(std::vector<ValuePlacement> producers,

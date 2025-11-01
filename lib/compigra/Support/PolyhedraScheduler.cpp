@@ -429,7 +429,7 @@ public:
     return commonPoints;
   }
 
-  // Example usage for your specific constraint: S0 < S1 < S2 < Sk
+  // : S0 < S1 < S2 < Sk
   void addOrderingConstraints() {
     // keep iterative order
     for (auto [sId, info] : statementInfos) {

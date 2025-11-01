@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <fstream>
+#include <random>
 #include <set>
 
 using namespace mlir;
@@ -62,9 +63,22 @@ void printBlockLiveValue(Region &region,
   }
 }
 
-void printLiveGraph(std::map<Block *, std::vector<ValuePlacement>> graph) {
+void printLiveGraph(std::map<Block *, std::vector<ValuePlacement>> graph,
+                    Block *printBlk = nullptr) {
   std::string message;
   llvm::raw_string_ostream rso(message);
+  if (printBlk && graph.count(printBlk)) {
+    rso << "------------------\n";
+    rso << *printBlk->getTerminator() << "\n";
+    for (auto val : graph[printBlk]) {
+      rso << val.val << " [" << val.pe << " " << static_cast<int>(val.regAttr)
+          << "]\n";
+    }
+    rso << "------------------\n";
+    logMessage(rso.str());
+    return;
+  }
+
   for (auto [blk, graph] : graph) {
     rso << "------------------\n";
     rso << *blk->getTerminator() << "\n";
@@ -431,11 +445,22 @@ void calculateTemporalSpatialSchedule(
   llvm::errs() << "Temporal spatial schedule is saved to " << fileName << "\n";
 }
 
+// Singleton pattern for global RNG
+inline std::mt19937 &globalRNG() {
+  static std::mt19937 gen;
+  return gen;
+}
+
+// Optional helper for setting the seed
+inline void setGlobalSeed(unsigned seed) { globalRNG().seed(seed); }
+
 static std::map<int, placeunit> getRandomInitialPlacement(
     std::map<int, SetVector<Value>> nodes, GridAttribute attr,
     const std::vector<ValuePlacement> liveValPlacement = {}) {
   std::map<int, placeunit> initialPlacement;
 
+  std::mt19937 &gen = globalRNG();
+  std::uniform_int_distribution<> dist(0, attr.nRow * attr.nCol - 1);
   for (auto &[index, vals] : nodes) {
     if (initialPlacement.count(index) > 0)
       continue;
@@ -455,8 +480,9 @@ static std::map<int, placeunit> getRandomInitialPlacement(
     }
     if (useExisting)
       continue;
-    // auto pe = std::rand() % (attr.nRow * attr.nCol);
-    // initialPlacement[index] = {pe, RegAttr::NK};
+
+    auto pe = dist(gen);
+    initialPlacement[index] = {pe, RegAttr::NK};
   }
   return initialPlacement;
 }
@@ -591,7 +617,8 @@ void optimizeAcrossBBValuePlacement(
   GridAttribute gridAttr = GridAttribute{nRow, nCol, nRow * nCol};
   std::map<int, compigra::placeunit> optimal;
   double minCost = 1e3;
-  for (auto iter = 0; iter < 10; iter++) {
+  setGlobalSeed(42);
+  for (auto iter = 0; iter < 100; iter++) {
     auto place = getRandomInitialPlacement(nodes, gridAttr, liveValPlacement);
     // evaluate the placement
     double cost = computeInitialPlacementCost(place, nodes, liveIns, gridAttr);
@@ -867,10 +894,10 @@ struct FastASMGenTemporalCGRAPass
 
       logMessage("InitGraph: ", false, debug);
       if (debug)
-        printLiveGraph(bbInitGraphs);
+        printLiveGraph(bbInitGraphs, &bb);
       logMessage("FiniGraph:", false, debug);
       if (debug)
-        printLiveGraph(bbFiniGraphs);
+        printLiveGraph(bbFiniGraphs, &bb);
 
       // Init operation assginer
       BasicBlockOpAssignment bbOpAssignment(&bb, maxReg, nRow, nCol, builder);
@@ -996,7 +1023,7 @@ struct FastASMGenTemporalCGRAPass
         region, rawSolution, "space_temporal_assignment.csv", blasLatency);
 
     asmGen.setSolution(rawSolution);
-    asmGen.setRFAccessModel(RFAccessModel::RF_READ);
+    // asmGen.setRFAccessModel(RFAccessModel::RF_READ);
     if (failed(asmGen.allocateRegisters())) {
       llvm::errs() << "Failed to allocate registers\n";
       return signalPassFailure();
