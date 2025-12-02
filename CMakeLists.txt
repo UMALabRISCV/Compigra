@@ -47,7 +47,7 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
   set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 
-  set(MLIR_DIR "./Polygeist/llvm-project/build/lib/cmake/mlir")
+  set(MLIR_DIR "./Polygeist/build/lib/cmake/mlir")
   message(STATUS "Searching for MLIRConfig.cmake in: ${MLIR_DIR}")
   find_package(MLIR REQUIRED CONFIG)
 
