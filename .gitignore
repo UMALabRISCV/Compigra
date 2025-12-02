@@ -5,3 +5,10 @@ build/*
 *.sat
 */satmapit/*
 benchmarks/*
+
+# Ignore agents metadata
+CLAUDE.md
+AGENTS.md
+
+# Ignore Gurobi files
+gurobi.lic
