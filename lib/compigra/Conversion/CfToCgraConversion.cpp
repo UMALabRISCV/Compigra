@@ -18,6 +18,7 @@
 #include "mlir/IR/MLIRContext.h"
 
 // memory interface support
+#define JSON_HAS_FILESYSTEM 0
 #include "nlohmann/json.hpp"
 #include <fstream>
 

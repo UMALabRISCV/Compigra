@@ -125,7 +125,13 @@ blockPeAssignment(GRBModel &model, Operation *srcOp, Operation *dstOp,
   }
   // check whether the model is feasible
   if (check) {
-    model.optimize();
+    try {
+      model.optimize();
+    } catch (GRBException &e) {
+      llvm::errs() << "Gurobi error in blockPeAssignment: " << e.getMessage()
+                   << " (code: " << e.getErrorCode() << ")\n";
+      return failure();
+    }
     if (model.get(GRB_IntAttr_Status) == GRB_OPTIMAL ||
         model.get(GRB_IntAttr_Status) == GRB_SUBOPTIMAL)
       return success();
@@ -261,7 +267,13 @@ blockPeAssignment(GRBModel &model, GRBVar constPE, std::string srcName,
   }
   // check whether the model is feasible
   if (check) {
-    model.optimize();
+    try {
+      model.optimize();
+    } catch (GRBException &e) {
+      llvm::errs() << "Gurobi error in blockPeAssignment (const): "
+                   << e.getMessage() << " (code: " << e.getErrorCode() << ")\n";
+      return failure();
+    }
     if (model.get(GRB_IntAttr_Status) == GRB_OPTIMAL ||
         model.get(GRB_IntAttr_Status) == GRB_SUBOPTIMAL)
       return success();
@@ -326,7 +338,14 @@ LogicalResult BasicBlockILPModel::createLocalDominanceConstraints(
       if (isa<cgra::ConditionalBranchOp>(userOp) && use.getOperandNumber() >= 2)
         continue;
       model.addConstr(var + 1 <= opTimeVar.at(userOp));
-      model.optimize();
+      try {
+        model.optimize();
+      } catch (GRBException &e) {
+        llvm::errs() << "Gurobi error in createLocalDominanceConstraints: "
+                     << e.getMessage() << " (code: " << e.getErrorCode() << ")\n";
+        strategy = FailureStrategy::Abort;
+        return failure();
+      }
       if (model.get(GRB_IntAttr_Status) != GRB_OPTIMAL &&
           model.get(GRB_IntAttr_Status) != GRB_SUBOPTIMAL) {
         llvm::errs() << "Failed to create local dominance constraints for "
@@ -420,7 +439,13 @@ LogicalResult BasicBlockILPModel::placeToCntPe(GRBModel &model, GRBVar center,
     model.addConstr(fLeft + fRight + fTop + fBottom + fSelf == 1);
   }
   if (check) {
-    model.optimize();
+    try {
+      model.optimize();
+    } catch (GRBException &e) {
+      llvm::errs() << "Gurobi error in placeToCntPe: " << e.getMessage()
+                   << " (code: " << e.getErrorCode() << ")\n";
+      return failure();
+    }
     if (model.get(GRB_IntAttr_Status) != GRB_OPTIMAL &&
         model.get(GRB_IntAttr_Status) != GRB_SUBOPTIMAL) {
       return failure();
@@ -516,7 +541,15 @@ LogicalResult BasicBlockILPModel::createGlobalLiveInInterConstraints(
 
       // the user operation should be assigned to the same PE
       model.addConstr(opPeVar.at(user) == pe);
-      model.optimize();
+      try {
+        model.optimize();
+      } catch (GRBException &e) {
+        llvm::errs() << "Gurobi error in createGlobalLiveInInterConstraints: "
+                     << e.getMessage() << " (code: " << e.getErrorCode() << ")\n";
+        spill = val;
+        failUser = user;
+        return failure();
+      }
       if (model.get(GRB_IntAttr_Status) != GRB_OPTIMAL &&
           model.get(GRB_IntAttr_Status) != GRB_SUBOPTIMAL) {
         llvm::errs() << "Failed to create global internal live in: " << val
@@ -566,7 +599,15 @@ LogicalResult BasicBlockILPModel::createGlobalLiveInExterConstraints(
       placeToCntPe(model, self, opPeVar.at(user), std::to_string(pe),
                    varName.at(user), "GIn_" + std::to_string(constrId));
       constrId++;
-      model.optimize();
+      try {
+        model.optimize();
+      } catch (GRBException &e) {
+        llvm::errs() << "Gurobi error in createGlobalLiveInExterConstraints: "
+                     << e.getMessage() << " (code: " << e.getErrorCode() << ")\n";
+        spill = val;
+        failUser = user;
+        return failure();
+      }
 
       if (model.get(GRB_IntAttr_Status) != GRB_OPTIMAL &&
           model.get(GRB_IntAttr_Status) != GRB_SUBOPTIMAL) {
@@ -660,7 +701,13 @@ static LogicalResult limitInternalRegUse(GRBModel &model, GRBVar peVar,
 
   accumulatedSum += flag;
   model.addConstr(accumulatedSum <= available);
-  model.optimize();
+  try {
+    model.optimize();
+  } catch (GRBException &e) {
+    llvm::errs() << "Gurobi error in limitInternalRegUse: " << e.getMessage()
+                 << " (code: " << e.getErrorCode() << ")\n";
+    return failure();
+  }
   if (model.get(GRB_IntAttr_Status) != GRB_OPTIMAL &&
       model.get(GRB_IntAttr_Status) != GRB_SUBOPTIMAL) {
     return failure();
@@ -686,7 +733,16 @@ LogicalResult BasicBlockILPModel::createGlobalLiveOutInterConstraints(
       continue;
 
     model.addConstr(opPeVar.at(defOp) == pe);
-    model.optimize();
+    try {
+      model.optimize();
+    } catch (GRBException &e) {
+      llvm::errs() << "Gurobi error in createGlobalLiveOutInterConstraints: "
+                   << e.getMessage() << " (code: " << e.getErrorCode() << ")\n";
+      strategy = FailureStrategy::Split;
+      spill = val;
+      failUser = nullptr;
+      return failure();
+    }
     if (model.get(GRB_IntAttr_Status) != GRB_OPTIMAL &&
         model.get(GRB_IntAttr_Status) != GRB_SUBOPTIMAL) {
       strategy = FailureStrategy::Split;
@@ -880,7 +936,13 @@ LogicalResult BasicBlockILPModel::createSchedulerAndSolve() {
   // Optimize the model
   model.write("model_" + std::to_string(bbId) + ".lp");
   model.set(GRB_DoubleParam_MIPGap, 0.05);
-  model.optimize();
+  try {
+    model.optimize();
+  } catch (GRBException &e) {
+    llvm::errs() << "Gurobi error in createSchedulerAndSolve: " << e.getMessage()
+                 << " (code: " << e.getErrorCode() << ")\n";
+    return failure();
+  }
 
   int status = model.get(GRB_IntAttr_Status);
   bool feasible = (status == GRB_OPTIMAL || status == GRB_SUBOPTIMAL);

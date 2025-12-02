@@ -614,7 +614,7 @@ void optimizeAcrossBBValuePlacement(
     nodes[nodes.size()] = relatedVals;
   }
 
-  GridAttribute gridAttr = GridAttribute{nRow, nCol, nRow * nCol};
+  GridAttribute gridAttr = GridAttribute{static_cast<unsigned>(nRow), static_cast<unsigned>(nCol), static_cast<unsigned>(nRow * nCol)};
   std::map<int, compigra::placeunit> optimal;
   double minCost = 1e3;
   setGlobalSeed(42);
