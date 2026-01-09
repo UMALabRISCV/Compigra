@@ -591,6 +591,12 @@ allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
       baseOp =
           builder.create<cgra::LwdOp>(funcOp.getLoc(), builder.getI32Type());
     } else {
+      // Use address from startAddr list if available for this argument
+      // ind is the total argument index, we need to track memref argument index
+      unsigned memrefInd = ind - directLoadArgNum;
+      if (memrefInd < startAddr.size()) {
+        lastPtr = startAddr[memrefInd];
+      }
       baseOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), lastPtr,
                                                     builder.getI32Type());
     }
