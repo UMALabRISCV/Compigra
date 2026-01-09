@@ -43,7 +43,24 @@ All the passes including front end optimization and back end assembly generation
 ./bin/compigra-opt -h
 ```
 
-For detailed instructions on compiling your C code using Compigra, refer to the [`runner_compile.sh`](./runner_compile.sh) script. This script integrates front-end parsing, user-defined middle-end optimizations, back-end mapping, and optimizations using modulo scheduling.
+For detailed instructions on compiling your C code using Compigra, refer to the [`cdfg_runner.sh`](./experiments/cdfg_runner.sh) or [`kernel_mmul_runner.sh`](./experiments/kernel_mmul_runner.sh) scripts. These scripts integrate front-end parsing, user-defined middle-end optimizations, back-end mapping, and optimizations using modulo scheduling.
+
+### Output Directory Structure
+All generated files are organized in a structured output directory when using the `--output-dir` option:
+
+```
+<benchmark>/output/
+├── schedule/           # ILP solver and scheduler files
+│   ├── gurobi.log
+│   ├── model_*.lp
+│   ├── sub_ilp_*.csv
+│   ├── temporalSpatialSchedule.csv
+│   └── liveValue.txt
+├── logs/               # Mapping debug logs
+│   └── compigra_mapping.log
+└── asm/                # Generated assembly
+    └── out_*.sat
+```
 
 
 ## Simulate your result

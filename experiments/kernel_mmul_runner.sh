@@ -108,6 +108,12 @@ mapper() {
     local f_cgra="$bench_path/IR_opt/cgra.mlir"
     local f_cgra_i32="$bench_path/IR_opt/cgra_i32.mlir"
     local f_asm="$bench_path/IR_opt/asm.mlir"
+    
+    # Create structured output directory for generated files
+    local output_dir="$bench_path/output"
+    mkdir -p "$output_dir/schedule"
+    mkdir -p "$output_dir/logs"
+    mkdir -p "$output_dir/asm"
 
     rm -f "$bench_path/IR_opt/"$f_cgra
     rm -f "$bench_path/IR_opt/"$f_cgra_i32
@@ -139,7 +145,7 @@ mapper() {
     local msOpt="python3 $MS_PLUGIN"
     $COMPIGRA_OPT --allow-unregistered-dialect --debug-only=REGISTER_ALLOCATION \
                 --gen-openedge-asm-fast="row=$row_size col=$col_size ms-opt='$msOpt' debug=0
-                asm-out=$bench_path/out_$row_size" \
+                asm-out=$output_dir/asm output-dir=$output_dir" \
                 "$f_cgra_i32" > "$f_asm"
 
     # Check if the compilation was successful
