@@ -1,0 +1,4 @@
+# Exclude from search/autocomplete (not from git)
+Polygeist/
+ESL-CGRA-simulator/
+build/

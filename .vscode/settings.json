@@ -1,0 +1,11 @@
+{
+  "search.exclude": {
+    "Polygeist/**": true,
+    "build/**": true,
+    "ESL-CGRA-simulator/**": true
+  },
+  "files.exclude": {
+    "Polygeist": true,
+    "build": true
+  }
+}

@@ -91,6 +91,12 @@ mapper() {
     local f_cgra="$bench_path/IR_opt/cgra.mlir"
     local f_cgra_i32="$bench_path/IR_opt/cgra_i32.mlir"
     local f_asm="$bench_path/IR_opt/asm.mlir"
+    
+    # Create structured output directory for generated files
+    local output_dir="$bench_path/output"
+    mkdir -p "$output_dir/schedule"
+    mkdir -p "$output_dir/logs"
+    mkdir -p "$output_dir/asm"
 
     rm -f "$bench_path/IR_opt/"$f_cgra
     rm -f "$bench_path/IR_opt/"$f_cgra_i32
@@ -132,20 +138,20 @@ mapper() {
         if [ "$use_scheduler" -eq 1 ]; then
             $COMPIGRA_OPT --allow-unregistered-dialect --debug-only=REGISTER_ALLOCATION \
                 --gen-temporal-cgra-asm="row=$row_size col=$col_size ms-opt='$msOpt'
-                asm-out=$bench_path/out_$row_size" \
+                asm-out=$output_dir/asm output-dir=$output_dir" \
                 "$f_cgra_i32" > "$f_asm"
         else 
             $COMPIGRA_OPT --allow-unregistered-dialect --debug-only=REGISTER_ALLOCATION \
                 --gen-temporal-cgra-asm="row=$row_size col=$col_size ms-opt='$msOpt'
-                asm-out=$bench_path/out_$row_size" \
+                asm-out=$output_dir/asm output-dir=$output_dir" \
                 "$f_cgra_i32" > "$f_asm"
         fi
     else
         start_addr=$(IFS=,; echo "${params[*]}")
         echo "start_addr: $start_addr"
         $COMPIGRA_OPT --allow-unregistered-dialect --debug-only=REGISTER_ALLOCATION \
-            --gen-temporal-cgra-asm="row=$row_size col=$col_size mem=$start_addr  ms-opt='$msOpt'
-            asm-out=$bench_path/out_$row_size" \
+            --gen-temporal-cgra-asm="row=$row_size col=$col_size mem=$start_addr ms-opt='$msOpt'
+            asm-out=$output_dir/asm output-dir=$output_dir" \
             "$f_cgra_i32" > "$f_asm"
     fi
 

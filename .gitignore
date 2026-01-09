@@ -1,4 +1,5 @@
 .vscode/*
+!.vscode/settings.json
 build/*
 *.sat
 *.mlir
@@ -17,11 +18,14 @@ gurobi.lic
 .DS_Store
 **/.DS_Store
 
-# Gurobi solver files
+# Compiler generated output directories
+# All scheduler, ILP, and log files now go to output/<benchmark>/
+**/output/
+
+# Legacy patterns (kept for backwards compatibility)
+# These individual file patterns can be removed once migration is complete:
 gurobi.log
 model_*.lp
-
-# ILP/Scheduler output files
 sub_ilp_*.csv
 space_temporal_assignment.csv
 temporalSpatialSchedule.csv
