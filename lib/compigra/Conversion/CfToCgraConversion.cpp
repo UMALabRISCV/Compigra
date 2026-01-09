@@ -587,27 +587,28 @@ allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
 
     // allocate memory for array argument
     Operation *baseOp = nullptr;
-    if (startAddr.empty()) {
-      baseOp =
-          builder.create<cgra::LwdOp>(funcOp.getLoc(), builder.getI32Type());
-    } else {
-      // Use address from startAddr list if available for this argument
-      // ind is the total argument index, we need to track memref argument index
-      unsigned memrefInd = ind - directLoadArgNum;
-      if (memrefInd < startAddr.size()) {
-        lastPtr = startAddr[memrefInd];
-      }
-      baseOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), lastPtr,
-                                                    builder.getI32Type());
+    // Calculate sequential address starting from 0 (or use provided startAddr)
+    unsigned memrefInd = ind - directLoadArgNum;
+    if (!startAddr.empty() && memrefInd < startAddr.size()) {
+      lastPtr = startAddr[memrefInd];
     }
+    // Always use constant addresses (auto-calculated from 0 if not specified)
+    baseOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), lastPtr,
+                                                  builder.getI32Type());
     constAddr[ind] = baseOp;
     baseOp->setAttr("BaseAddr",
                     builder.getStringAttr("arg" + std::to_string(ind)));
     SmallVector<Operation *> dimOps;
-    int memRefSize = 1;
+    
+    // Calculate total memref size (all dimensions multiplied)
+    int64_t totalElements = 1;
+    for (int i = 0; i < memrefType.getRank(); i++) {
+      totalElements *= memrefType.getDimSize(i);
+    }
+    
+    // Create dimension product ops for addressing (starting from dim 1)
     for (int i = 1; i < memrefType.getRank(); i++) {
       auto curDim = memrefType.getDimSize(i);
-      memRefSize *= curDim;
       auto dimOp = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), curDim,
                                                         builder.getI32Type());
       dimOp->setAttr("arg", builder.getIntegerAttr(builder.getI32Type(), ind));
@@ -616,7 +617,7 @@ allocateMemory(ModuleOp &modOp, DenseMap<int, Operation *> &constAddr,
       dimOps.push_back(dimOp);
     }
     offValMap[baseOp] = dimOps;
-    lastPtr += memRefSize * 4;
+    lastPtr += totalElements * 4;  // 4 bytes per i32 element
   }
   // create a constant operation to initialize the offset
   auto offset = builder.create<arith::ConstantIntOp>(funcOp.getLoc(), 4,
