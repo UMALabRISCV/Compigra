@@ -16,6 +16,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include <iomanip> // For std::setw
 
 using namespace mlir;
@@ -146,7 +148,12 @@ void TemporalCGRAScheduler::computeLiveValue() {
     }
   }
 
-  printBlockLiveValue("liveValue.txt");
+  // Write live values to schedule subdirectory
+  llvm::SmallString<256> liveValuePath(outputDir);
+  llvm::sys::path::append(liveValuePath, "schedule");
+  llvm::sys::fs::create_directories(liveValuePath);
+  llvm::sys::path::append(liveValuePath, "liveValue.txt");
+  printBlockLiveValue(std::string(liveValuePath.str()));
 }
 
 void TemporalCGRAScheduler::printBlockLiveValue(std::string fileName) {
@@ -1047,13 +1054,19 @@ LogicalResult TemporalCGRAScheduler::createSchedulerAndSolve() {
   // Create scheduler for each block
   makeScheduleSeq();
   computeLiveValue();
-  printBlockLiveValue("liveValue.txt");
+  // Write live values to schedule subdirectory
+  llvm::SmallString<256> liveValuePath(outputDir);
+  llvm::sys::path::append(liveValuePath, "schedule");
+  llvm::sys::fs::create_directories(liveValuePath);
+  llvm::sys::path::append(liveValuePath, "liveValue.txt");
+  printBlockLiveValue(std::string(liveValuePath.str()));
 
   for (auto [bb, block] : llvm::enumerate(scheduleSeq)) {
 
     // llvm::errs() << "\nBlock " << bb << " is scheduling\n";
 
     BasicBlockILPModel bbILPModel(maxReg, nRow, nCol, block, bb, builder);
+    bbILPModel.setOutputDir(outputDir);
 
     bool findSolution = false;
 
@@ -1149,7 +1162,12 @@ LogicalResult TemporalCGRAScheduler::createSchedulerAndSolve() {
     llvm::errs() << scheduleIdx << " block is scheduled:\n   "
                  << *block->getTerminator() << "\n\n";
   }
-  calculateTemporalSpatialSchedule("temporalSpatialSchedule.csv");
+  // Write schedule to schedule subdirectory
+  llvm::SmallString<256> schedulePath(outputDir);
+  llvm::sys::path::append(schedulePath, "schedule");
+  llvm::sys::fs::create_directories(schedulePath);
+  llvm::sys::path::append(schedulePath, "temporalSpatialSchedule.csv");
+  calculateTemporalSpatialSchedule(std::string(schedulePath.str()));
   // printBlockLiveValue("liveValue.txt");
   return success();
 }

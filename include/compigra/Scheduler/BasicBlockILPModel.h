@@ -99,6 +99,8 @@ public:
   // the modulo scheduler result and solve the liveness dependency.
   void setSolverMode(int mode) { solverMode = mode; }
 
+  void setOutputDir(const std::string &dir) { outputDir = dir; }
+
 private:
   // Interface for the the global schduler if the ILP model does not have
   // solution
@@ -112,6 +114,7 @@ private:
 
   Block *block;
   unsigned bbId;
+  std::string outputDir = ".";
 
   // Hash map to store the live value for each PE
   liveVec liveInInter;

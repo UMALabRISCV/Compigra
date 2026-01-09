@@ -14,6 +14,7 @@
 #include "compigra/ASMGen/ASMGenTempCGRA.h"
 #include "compigra/CgraDialect.h"
 #include "compigra/CgraOps.h"
+#include "compigra/Scheduler/BasicBlockOpAssignment.h"
 #include "compigra/Scheduler/KernelSchedule.h"
 #include "compigra/Scheduler/ModuloScheduleAdapter.h"
 #include "compigra/Support/OpenEdgeASM.h"
@@ -131,9 +132,14 @@ struct ASMGenTemporalCGRAPass
     Region &region = funcOp.getBody();
     OpBuilder builder(funcOp);
 
+    // Configure output directory for logs and scheduler files
+    std::string outDirForScheduler = outputDir.empty() ? "." : std::string(outputDir);
+    compigra::setLogOutputDir(outDirForScheduler);
+
     unsigned maxReg = 5;
     TemporalCGRAScheduler scheduler(region, maxReg, nRow, nCol, builder);
     scheduler.setReserveMem(mem);
+    scheduler.setOutputDir(outDirForScheduler);
 
     size_t lastSlashPos = outDir.find_last_of("/");
     // if msOpt is empty, skip the pre-schedule

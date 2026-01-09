@@ -15,6 +15,8 @@
 #include "fstream"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include <iomanip> // For std::setw
 
 using namespace mlir;
@@ -870,7 +872,12 @@ void BasicBlockILPModel::saveSubILPModelResult(std::string filename) {
 
 LogicalResult BasicBlockILPModel::createSchedulerAndSolve() {
   // Create scheduler for each operation
-  GRBEnv env = GRBEnv("./gurobi.log");
+  // Build path for gurobi.log in schedule subdirectory
+  llvm::SmallString<256> gurobiLogPath(outputDir);
+  llvm::sys::path::append(gurobiLogPath, "schedule");
+  llvm::sys::fs::create_directories(gurobiLogPath);
+  llvm::sys::path::append(gurobiLogPath, "gurobi.log");
+  GRBEnv env = GRBEnv(std::string(gurobiLogPath.str()));
   env.set(GRB_IntParam_OutputFlag, 0);
   env.start();
   GRBModel model = GRBModel(env);
@@ -934,7 +941,11 @@ LogicalResult BasicBlockILPModel::createSchedulerAndSolve() {
   time_limit = 1200;
   // model.set(GRB_DoubleParam_TimeLimit, time_limit);
   // Optimize the model
-  model.write("model_" + std::to_string(bbId) + ".lp");
+  // Write model to schedule subdirectory
+  llvm::SmallString<256> modelPath(outputDir);
+  llvm::sys::path::append(modelPath, "schedule");
+  llvm::sys::path::append(modelPath, "model_" + std::to_string(bbId) + ".lp");
+  model.write(std::string(modelPath.str()));
   model.set(GRB_DoubleParam_MIPGap, 0.05);
   try {
     model.optimize();
@@ -953,7 +964,11 @@ LogicalResult BasicBlockILPModel::createSchedulerAndSolve() {
 
   writeLiveOutResult(peVarMap);
   writeILPResult(timeVarMap, peVarMap);
-  saveSubILPModelResult("sub_ilp_" + std::to_string(bbId) + ".csv");
+  // Write sub ILP result to schedule subdirectory
+  llvm::SmallString<256> subIlpPath(outputDir);
+  llvm::sys::path::append(subIlpPath, "schedule");
+  llvm::sys::path::append(subIlpPath, "sub_ilp_" + std::to_string(bbId) + ".csv");
+  saveSubILPModelResult(std::string(subIlpPath.str()));
   return success();
 }
 

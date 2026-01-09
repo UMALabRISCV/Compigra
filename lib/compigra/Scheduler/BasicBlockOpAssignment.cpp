@@ -14,6 +14,8 @@
 #include "compigra/Scheduler/BasicBlockOpAssignment.h"
 #include "compigra/CgraOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include <fstream>
 #include <numeric>
 #include <queue>
@@ -21,18 +23,33 @@
 using namespace mlir;
 using namespace compigra;
 
+// Global output directory for log files
+static std::string g_logOutputDir = ".";
+
+void compigra::setLogOutputDir(const std::string &dir) {
+  g_logOutputDir = dir;
+}
+
 // Function to log messages to a file
 void logMessage(const std::string &message, bool overwrite, bool debug) {
   if (!debug)
     return;
+  
+  // Build path for log file in logs subdirectory
+  llvm::SmallString<256> logPath(g_logOutputDir);
+  llvm::sys::path::append(logPath, "logs");
+  llvm::sys::fs::create_directories(logPath);
+  llvm::sys::path::append(logPath, "compigra_mapping.log");
+  std::string logFilePath = std::string(logPath.str());
+  
   // if overwrite is true, clear the log file
   if (overwrite) {
-    std::ofstream logFile("compigra_mapping.log",
+    std::ofstream logFile(logFilePath,
                           std::ios::out | std::ios::trunc);
     logFile.close();
   }
 
-  std::ofstream logFile("compigra_mapping.log", std::ios::out | std::ios::app);
+  std::ofstream logFile(logFilePath, std::ios::out | std::ios::app);
   if (!logFile.is_open()) {
     llvm::errs() << "ERROR: Unable to open log file for writing.\n";
     return;

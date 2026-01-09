@@ -22,6 +22,11 @@ using namespace mlir;
 void logMessage(const std::string &message, bool overwrite = false,
                 bool debug = true);
 
+namespace compigra {
+/// Set the output directory for log files (compigra_mapping.log)
+void setLogOutputDir(const std::string &dir);
+} // namespace compigra
+
 void computeLiveValue(Region &region,
                       std::map<Block *, SetVector<Value>> &liveIns,
                       std::map<Block *, SetVector<Value>> &liveOuts);

@@ -875,6 +875,10 @@ struct FastASMGenTemporalCGRAPass
     computeLiveValue(region, liveIns, liveOuts);
     // printBlockLiveValue(region, liveIns, liveOuts);
 
+    // Configure output directory for logs
+    std::string outDirForLogs = outputDir.empty() ? "." : std::string(outputDir);
+    compigra::setLogOutputDir(outDirForLogs);
+
     int bbId = 0;
 
     logMessage("BasicBlock op assignment\n", true);

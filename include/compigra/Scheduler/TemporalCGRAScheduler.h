@@ -37,6 +37,7 @@ public:
 private:
   Region &region;
   OpBuilder builder;
+  std::string outputDir = ".";
 
   // std::map<Block *, int> blockStartT;
   std::map<Block *, int> blockEndT;
@@ -65,6 +66,10 @@ public:
   void setMaxLivePath(unsigned maxLivePath) { this->maxLivePath = maxLivePath; }
 
   void setReserveMem(unsigned reserveMem) { this->reserveMem = reserveMem; }
+
+  void setOutputDir(const std::string &dir) { this->outputDir = dir; }
+
+  const std::string &getOutputDir() const { return outputDir; }
 
   // The schedule result comes from external scheduler, which does not support
   // DFG split for the blocks.
