@@ -12,3 +12,18 @@ AGENTS.md
 
 # Ignore Gurobi files
 gurobi.lic
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Gurobi solver files
+gurobi.log
+model_*.lp
+
+# ILP/Scheduler output files
+sub_ilp_*.csv
+space_temporal_assignment.csv
+temporalSpatialSchedule.csv
+liveValue.txt
+compigra_mapping.log
