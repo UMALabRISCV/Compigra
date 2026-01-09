@@ -1,3 +1,7 @@
 [submodule "Polygeist"]
 	path = Polygeist
 	url = https://github.com/llvm/Polygeist.git
+[submodule "ESL-CGRA-simulator"]
+	path = ESL-CGRA-simulator
+	url = https://github.com/esl-epfl/ESL-CGRA-simulator.git
+	branch = srf
